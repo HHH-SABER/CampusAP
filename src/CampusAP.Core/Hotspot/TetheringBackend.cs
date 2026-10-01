@@ -113,6 +113,27 @@ public sealed class TetheringBackend : IDisposable
         return (config.Ssid, config.Passphrase ?? "", ToHotspotBand(config.Band));
     }
 
+    /// <summary>读取当前已连接热点的设备列表（IP + MAC），系统权威数据</summary>
+    public List<TetheringClientInfo> GetClients()
+    {
+        var manager = RequireManager();
+        var result = new List<TetheringClientInfo>();
+        foreach (var client in manager.GetTetheringClients())
+        {
+            string? ip = null;
+            foreach (var host in client.HostNames)
+            {
+                if (host.Type == Windows.Networking.HostNameType.Ipv4)
+                {
+                    ip = host.DisplayName;
+                    break;
+                }
+            }
+            if (ip is not null) result.Add(new TetheringClientInfo(ip, client.MacAddress ?? ""));
+        }
+        return result;
+    }
+
     /// <summary>无副作用地取当前状态（供 UI 轮询；也能感知用户在系统设置里手动开关）</summary>
     public HotspotStatus PeekStatus()
     {

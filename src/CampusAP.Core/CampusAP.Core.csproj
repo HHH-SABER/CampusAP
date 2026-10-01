@@ -8,4 +8,8 @@
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="WinDivertSharp" Version="1.4.3.2" />
+  </ItemGroup>
+
 </Project>

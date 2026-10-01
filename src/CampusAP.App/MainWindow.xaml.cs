@@ -19,6 +19,37 @@ public partial class MainWindow : Window
         DataContext = _viewModel;
         Loaded += (_, _) => _viewModel.InitializeCommand.Execute(null);
         _trayIcon = (H.NotifyIcon.TaskbarIcon)FindResource("TrayIcon");
+        _viewModel.FloatToggleRequested += () => Dispatcher.Invoke(ToggleFloatWindow);
+        Application.Current.Exit += (_, _) =>
+        {
+            _trayIcon.Visibility = Visibility.Collapsed;
+            _trayIcon.Dispose();
+        };
+    }
+
+    private FloatWindow? _floatWindow;
+
+    private void ToggleFloatWindow()
+    {
+        if (_floatWindow is null)
+        {
+            _floatWindow = new FloatWindow { DataContext = _viewModel };
+            _floatWindow.Closed += (_, _) =>
+            {
+                _floatWindow = null;
+                _viewModel.FloatWindowOpen = false;
+            };
+        }
+        if (_floatWindow.IsVisible)
+        {
+            _floatWindow.Hide();
+            _viewModel.FloatWindowOpen = false;
+        }
+        else
+        {
+            _floatWindow.Show();
+            _viewModel.FloatWindowOpen = true;
+        }
     }
 
     private void TrayIcon_LeftClick(object sender, RoutedEventArgs e) => RestoreFromTray();

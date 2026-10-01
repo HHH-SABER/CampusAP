@@ -16,6 +16,17 @@
     <Resource Include="Assets\app.ico" />
   </ItemGroup>
 
+  <!-- WinDivert 原生文件（NuGet 包 build 目录）随主程序分发，保持仓库无二进制。
+       ExcludeFromSingleFile：单文件发布时保持松散文件，WinDivert.dll 需要在自己目录找到 WinDivert64.sys -->
+  <ItemGroup>
+    <None Include="$(NuGetPackageRoot)windivertsharp\1.4.3.2\build\x64\WinDivert.dll"
+          Link="WinDivert.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true" Visible="false" />
+    <None Include="$(NuGetPackageRoot)windivertsharp\1.4.3.2\build\x64\WinDivert64.sys"
+          Link="WinDivert64.sys" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true" Visible="false" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
     <PackageReference Include="H.NotifyIcon.Wpf" Version="2.3.2" />

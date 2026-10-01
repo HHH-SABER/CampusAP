@@ -3,9 +3,10 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:core="clr-namespace:CampusAP.Core.Hotspot;assembly=CampusAP.Core"
         xmlns:tb="clr-namespace:H.NotifyIcon;assembly=H.NotifyIcon.Wpf"
+        xmlns:controls="clr-namespace:CampusAP.App.Controls"
         Title="CampusAP · 校园热点助手"
-        Height="680" Width="980"
-        MinWidth="820" MinHeight="600"
+        Height="840" Width="980"
+        MinWidth="820" MinHeight="740"
         WindowStartupLocation="CenterScreen"
         Icon="/Assets/app.ico"
         Background="#F1F5F9"
@@ -117,6 +118,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- 头部 -->
@@ -217,5 +219,38 @@
                 </Border>
             </StackPanel>
         </Grid>
+
+        <!-- 设备与流量 -->
+        <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0" MaxHeight="260">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0" Margin="0,0,0,6">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="设备与流量" Style="{StaticResource CardTitle}" Margin="0"/>
+                    <Button Grid.Column="1" Content="{Binding FloatToggleText}"
+                            Command="{Binding ToggleFloatWindowCommand}" Cursor="Hand"
+                            Padding="10,4" BorderThickness="0" Foreground="White" FontWeight="SemiBold"
+                            VerticalAlignment="Center">
+                        <Button.Style>
+                            <Style TargetType="Button">
+                                <Setter Property="Background" Value="#0EA5E9"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding FloatWindowOpen}" Value="True">
+                                        <Setter Property="Background" Value="#64748B"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                </Grid>
+                <controls:DevicePanel Grid.Row="1"/>
+            </Grid>
+        </Border>
     </Grid>
 </Window>

@@ -32,3 +32,6 @@ public enum HotspotBand
     Band24GHz,
     Band5GHz,
 }
+
+/// <summary>一台已连接到热点的设备（系统 tethering API 视角）</summary>
+public record TetheringClientInfo(string Ip, string Mac);
