@@ -1,15 +1,27 @@
-# 构建产物
+# ===== 构建产物 =====
 bin/
 obj/
 publish/
 发布/
 
-# IDE
+# ===== IDE =====
 .vs/
 .idea/
 *.user
 *.suo
 
-# 运行时配置（含用户偏好，不入库）
-*.lnk
+# ===== 本机运行状态（插件/工具生成）=====
 .mimosa/
+*.lnk
+
+# ===== 敏感与运行时配置（凭据只存 %APPDATA%，此处防御性兜底）=====
+*.log
+.env
+.env.*
+secrets*.json
+appsettings.*.json
+settings.local.json
+
+# ===== 系统杂项 =====
+Thumbs.db
+.DS_Store

@@ -1,0 +1,5 @@
+#!/bin/sh
+# 预提交敏感信息扫描（规则见 .githooks/sensitive_scan.py）
+# 需要 python 在 PATH 中；跳过方式：git commit --no-verify（请自行确认内容安全）
+git diff --cached --name-only --diff-filter=ACM -z \
+| python "$(git rev-parse --show-toplevel)/.githooks/sensitive_scan.py"
