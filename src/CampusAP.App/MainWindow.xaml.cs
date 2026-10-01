@@ -11,7 +11,7 @@ public partial class MainWindow : Window
     private readonly MainViewModel _viewModel = new();
     private readonly H.NotifyIcon.TaskbarIcon _trayIcon;
     private bool _forceClose;
-    private bool _balloonShown;
+    private bool _sessionEnding;
     private bool _hotspotExitConfirmed;
 
     public MainWindow()
@@ -22,7 +22,15 @@ public partial class MainWindow : Window
         _trayIcon = (H.NotifyIcon.TaskbarIcon)FindResource("TrayIcon");
         _viewModel.FloatToggleRequested += () => Dispatcher.Invoke(ToggleFloatWindow);
         // Windows 注销/关机时不弹任何确认框，随系统直接结束
-        Application.Current.SessionEnding += (_, _) => _forceClose = true;
+        Application.Current.SessionEnding += (_, _) => { _sessionEnding = true; _forceClose = true; };
+        // 第二个实例启动时唤醒本实例（可能正藏在托盘）
+        _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            while (App.RestoreSignal is System.Threading.EventWaitHandle signal && signal.WaitOne())
+            {
+                Dispatcher.Invoke(RestoreFromTray);
+            }
+        });
         Application.Current.Exit += (_, _) =>
         {
             _trayIcon.Visibility = Visibility.Collapsed;
@@ -79,7 +87,9 @@ public partial class MainWindow : Window
             var action = _viewModel.Settings.CloseAction;
             if (action == CloseAction.Ask)
             {
-                var dialog = new CloseBehaviorDialog { Owner = this };
+                // Owner 只能在本窗口已显示时设置，否则（如关机路径的收尾关闭）会抛 InvalidOperationException
+                var dialog = new CloseBehaviorDialog();
+                if (IsLoaded) dialog.Owner = this;
                 if (dialog.ShowDialog() == true)
                 {
                     action = dialog.Choice;
@@ -103,20 +113,21 @@ public partial class MainWindow : Window
                 e.Cancel = true;
                 Hide();
                 _trayIcon.Visibility = Visibility.Visible;
-                if (!_balloonShown)
+                try
                 {
-                    _balloonShown = true;
-                    try { _trayIcon.ShowNotification("CampusAP", "已隐藏到系统托盘，点击图标恢复窗口"); }
-                    catch { /* 通知失败不影响功能 */ }
+                    // 每次都提示：托盘图标默认收在任务栏右下角"^"溢出区，不提示容易被当成已退出
+                    _trayIcon.ShowNotification("CampusAP",
+                        "已隐藏到系统托盘，点击图标恢复窗口（看不到图标请点任务栏右下角的 ^ 展开）");
                 }
+                catch { /* 通知失败不影响功能 */ }
                 base.OnClosing(e);
                 return;
             }
         }
 
-        // 热点由系统托管：程序退出后 Windows 会继续共享网络（这次交接时“程序消失但手机仍连着”的根源）。
-        // 真正退出前给用户一次选择，覆盖窗口退出/托盘退出/记住的直接退出三条路径。
-        if (!_hotspotExitConfirmed && _viewModel.State == HotspotState.On)
+        // 热点由系统托管：程序退出后 Windows 会继续共享网络（这次交接时"程序消失但手机仍连着"的根源）。
+        // 真正退出前给用户一次选择，覆盖窗口退出/托盘退出/记住的直接退出三条路径；注销/关机时跳过。
+        if (!_hotspotExitConfirmed && !_sessionEnding && _viewModel.State == HotspotState.On)
         {
             e.Cancel = true;
             ConfirmExitWithHotspotOn();
