@@ -321,9 +321,11 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="设备与流量" Style="{StaticResource CardTitle}" Margin="0"/>
-                    <TextBlock Text="双击设备名可自定义命名" FontSize="10.5" Foreground="#94A3B8"
-                               VerticalAlignment="Bottom" Margin="10,0,0,2"/>
+                    <StackPanel Grid.Column="0" Orientation="Horizontal">
+                        <TextBlock Text="设备与流量" Style="{StaticResource CardTitle}" Margin="0" VerticalAlignment="Bottom"/>
+                        <TextBlock Text="双击设备名可自定义命名" FontSize="10.5" Foreground="#94A3B8"
+                                   VerticalAlignment="Bottom" Margin="10,0,0,3"/>
+                    </StackPanel>
                     <Button Grid.Column="1" Content="{Binding FloatToggleText}"
                             Command="{Binding ToggleFloatWindowCommand}" Cursor="Hand"
                             Padding="10,4" BorderThickness="0" Foreground="White" FontWeight="SemiBold"
