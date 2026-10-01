@@ -2,11 +2,12 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:core="clr-namespace:CampusAP.Core.Hotspot;assembly=CampusAP.Core"
+        xmlns:ca="clr-namespace:CampusAP.Core.CampusAuth;assembly=CampusAP.Core"
         xmlns:tb="clr-namespace:H.NotifyIcon;assembly=H.NotifyIcon.Wpf"
         xmlns:controls="clr-namespace:CampusAP.App.Controls"
         Title="CampusAP · 校园热点助手"
-        Height="840" Width="980"
-        MinWidth="820" MinHeight="740"
+        Height="950" Width="980"
+        MinWidth="820" MinHeight="840"
         WindowStartupLocation="CenterScreen"
         Icon="/Assets/app.ico"
         Background="#F1F5F9"
@@ -92,9 +93,32 @@
             </Style.Triggers>
         </Style>
 
+        <!-- 校园网认证状态点 -->
+        <Style x:Key="AuthDot" TargetType="Ellipse">
+            <Setter Property="Width" Value="12"/>
+            <Setter Property="Height" Value="12"/>
+            <Setter Property="Fill" Value="#94A3B8"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding AuthState}" Value="{x:Static ca:CampusAuthState.Online}">
+                    <Setter Property="Fill" Value="#22C55E"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding AuthState}" Value="{x:Static ca:CampusAuthState.Checking}">
+                    <Setter Property="Fill" Value="#F59E0B"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding AuthState}" Value="{x:Static ca:CampusAuthState.NeedLogin}">
+                    <Setter Property="Fill" Value="#F59E0B"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding AuthState}" Value="{x:Static ca:CampusAuthState.PortalHijack}">
+                    <Setter Property="Fill" Value="#EF4444"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding AuthState}" Value="{x:Static ca:CampusAuthState.NoInternet}">
+                    <Setter Property="Fill" Value="#EF4444"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
         <!-- 大开关按钮：随状态变色 -->
-        <Style x:Key="ToggleButton" TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
-            <Setter Property="Height" Value="54"/>
+        <Style x:Key="ToggleButton" TargetType="Button" BasedOn="{StaticResource PrimaryButton}">            <Setter Property="Height" Value="54"/>
             <Setter Property="FontSize" Value="17"/>
             <Setter Property="Background" Value="#2563EB"/>
             <Style.Triggers>
@@ -133,91 +157,156 @@
                 <ColumnDefinition Width="1*"/>
             </Grid.ColumnDefinitions>
 
-            <!-- 左：热点控制 -->
-            <Border Grid.Column="0" Style="{StaticResource Card}" Margin="0,0,12,14">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
-                    </Grid.RowDefinitions>
+            <!-- 左：热点控制 + 诊断 -->
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel>
+                    <Border Style="{StaticResource Card}" Margin="0,0,12,14">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
 
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <Ellipse Style="{StaticResource StateDot}" VerticalAlignment="Center"/>
-                        <TextBlock Text="{Binding StatusText}" Margin="8,0,0,0"
-                                   FontSize="15" FontWeight="SemiBold" Foreground="#0F172A"
-                                   VerticalAlignment="Center"/>
-                    </StackPanel>
-
-                    <Button Grid.Row="1" Style="{StaticResource ToggleButton}"
-                            Content="{Binding ToggleText}"
-                            Command="{Binding ToggleCommand}"
-                            Margin="0,14,0,0"/>
-
-                    <Grid Grid.Row="2" Margin="0,16,0,0">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0">
-                            <TextBlock Text="热点名称" Style="{StaticResource FieldLabel}" Margin="0"/>
-                            <TextBlock Text="{Binding Ssid}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
-                                       ToolTip="{Binding Ssid}"/>
-                        </StackPanel>
-                        <StackPanel Grid.Column="1">
-                            <TextBlock Text="已连接设备" Style="{StaticResource FieldLabel}" Margin="0"/>
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="{Binding ClientCount}" FontWeight="SemiBold"/>
-                                <TextBlock Text=" 台"/>
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <Ellipse Style="{StaticResource StateDot}" VerticalAlignment="Center"/>
+                                <TextBlock Text="{Binding StatusText}" Margin="8,0,0,0"
+                                           FontSize="15" FontWeight="SemiBold" Foreground="#0F172A"
+                                           VerticalAlignment="Center"/>
                             </StackPanel>
+
+                            <Button Grid.Row="1" Style="{StaticResource ToggleButton}"
+                                    Content="{Binding ToggleText}"
+                                    Command="{Binding ToggleCommand}"
+                                    Margin="0,14,0,0"/>
+
+                            <Grid Grid.Row="2" Margin="0,16,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="热点名称" Style="{StaticResource FieldLabel}" Margin="0"/>
+                                    <TextBlock Text="{Binding Ssid}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding Ssid}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="已连接设备" Style="{StaticResource FieldLabel}" Margin="0"/>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="{Binding ClientCount}" FontWeight="SemiBold"/>
+                                        <TextBlock Text=" 台"/>
+                                    </StackPanel>
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Text="密码" Style="{StaticResource FieldLabel}" Margin="0"/>
+                                    <TextBlock Text="{Binding Password}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding Password}"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- 二维码 -->
+                            <StackPanel Grid.Row="3" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,10,0,0">
+                                <Image Source="{Binding QrImage}" Width="170" Height="170" RenderOptions.BitmapScalingMode="NearestNeighbor"/>
+                                <TextBlock Text="手机扫码即可连接热点" Foreground="#64748B" FontSize="12"
+                                           HorizontalAlignment="Center" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}" Margin="0,0,12,0">
+                        <StackPanel>
+                            <TextBlock Text="能力检测与诊断" Style="{StaticResource CardTitle}"/>
+                            <TextBlock Text="{Binding DiagnosisText}" TextWrapping="Wrap"
+                                       Foreground="#334155" LineHeight="20"/>
                         </StackPanel>
-                        <StackPanel Grid.Column="2">
-                            <TextBlock Text="密码" Style="{StaticResource FieldLabel}" Margin="0"/>
-                            <TextBlock Text="{Binding Password}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
-                                       ToolTip="{Binding Password}"/>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- 右：热点配置 + 校园网认证 -->
+            <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel>
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Text="热点配置" Style="{StaticResource CardTitle}"/>
+                            <TextBlock Text="热点名称（SSID，≤32 字符）" Style="{StaticResource FieldLabel}" Margin="0"/>
+                            <TextBox Text="{Binding Ssid, UpdateSourceTrigger=PropertyChanged}" MaxLength="32"/>
+                            <TextBlock Text="密码（WPA2，至少 8 位）" Style="{StaticResource FieldLabel}"/>
+                            <TextBox Text="{Binding Password, UpdateSourceTrigger=PropertyChanged}" MaxLength="63"/>
+                            <Grid Margin="0,12,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="频段" Style="{StaticResource FieldLabel}" Margin="0"/>
+                                    <ComboBox SelectedIndex="{Binding BandIndex}" Height="34" HorizontalAlignment="Stretch">
+                                        <ComboBoxItem Content="自动"/>
+                                        <ComboBoxItem Content="2.4 GHz（兼容性好）"/>
+                                        <ComboBoxItem Content="5 GHz（快，部分手机不支持）"/>
+                                    </ComboBox>
+                                </StackPanel>
+                                <Button Grid.Column="1" Content="应用配置" Style="{StaticResource PrimaryButton}"
+                                        Command="{Binding ApplyConfigCommand}" VerticalAlignment="Bottom"/>
+                            </Grid>
                         </StackPanel>
-                    </Grid>
+                    </Border>
 
-                    <!-- 二维码 -->
-                    <StackPanel Grid.Row="3" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,10,0,0">
-                        <Image Source="{Binding QrImage}" Width="170" Height="170" RenderOptions.BitmapScalingMode="NearestNeighbor"/>
-                        <TextBlock Text="手机扫码即可连接热点" Foreground="#64748B" FontSize="12"
-                                   HorizontalAlignment="Center" Margin="0,6,0,0"/>
-                    </StackPanel>
-                </Grid>
-            </Border>
-
-            <!-- 右：配置 + 诊断 -->
-            <StackPanel Grid.Column="1">
-                <Border Style="{StaticResource Card}">
-                    <StackPanel>
-                        <TextBlock Text="热点配置" Style="{StaticResource CardTitle}"/>
-                        <TextBlock Text="热点名称（SSID，≤32 字符）" Style="{StaticResource FieldLabel}" Margin="0"/>
-                        <TextBox Text="{Binding Ssid, UpdateSourceTrigger=PropertyChanged}" MaxLength="32"/>
-                        <TextBlock Text="密码（WPA2，至少 8 位）" Style="{StaticResource FieldLabel}"/>
-                        <TextBox Text="{Binding Password, UpdateSourceTrigger=PropertyChanged}" MaxLength="63"/>
-                        <TextBlock Text="频段" Style="{StaticResource FieldLabel}"/>
-                        <ComboBox SelectedIndex="{Binding BandIndex}" Height="34">
-                            <ComboBoxItem Content="自动"/>
-                            <ComboBoxItem Content="2.4 GHz（兼容性好）"/>
-                            <ComboBoxItem Content="5 GHz（快，部分手机不支持）"/>
-                        </ComboBox>
-                        <Button Content="应用配置" Style="{StaticResource PrimaryButton}"
-                                Command="{Binding ApplyConfigCommand}" Margin="0,14,0,0"
-                                HorizontalAlignment="Right"/>
-                    </StackPanel>
-                </Border>
-
-                <Border Style="{StaticResource Card}" Margin="0">
-                    <StackPanel>
-                        <TextBlock Text="能力检测与诊断" Style="{StaticResource CardTitle}"/>
-                        <TextBlock Text="{Binding DiagnosisText}" TextWrapping="Wrap"
-                                   Foreground="#334155" LineHeight="20"/>
-                    </StackPanel>
-                </Border>
-            </StackPanel>
+                    <Border Style="{StaticResource Card}" Margin="0">
+                        <StackPanel>
+                            <TextBlock Text="校园网认证" Style="{StaticResource CardTitle}" Margin="0"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Ellipse Grid.Column="0" Style="{StaticResource AuthDot}" VerticalAlignment="Center"/>
+                                <TextBlock Grid.Column="1" Text="{Binding AuthStatusText}" Margin="8,0,8,0" FontSize="12.5"
+                                           Foreground="#0F172A" VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTip="{Binding AuthStatusText}"/>
+                                <CheckBox Grid.Column="2" Content="掉线自动重登" IsChecked="{Binding CampusAutoRelogin}"
+                                          VerticalAlignment="Center" FontSize="12" Foreground="#64748B"/>
+                            </Grid>
+                            <Grid Margin="0,6,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="1.1*"/>
+                                    <ColumnDefinition Width="1*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                                    <TextBlock Text="校园网账号" Style="{StaticResource FieldLabel}"/>
+                                    <TextBox Text="{Binding CampusUserId, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="密码" Style="{StaticResource FieldLabel}"/>
+                                    <TextBox Text="{Binding CampusPassword, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                            </Grid>
+                            <Grid Margin="0,10,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                                    <TextBlock Text="运营商服务（不确定就留空）" Style="{StaticResource FieldLabel}"/>
+                                    <TextBox Text="{Binding CampusService, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                                <Button Grid.Column="1" Content="登录" Style="{StaticResource PrimaryButton}"
+                                        Command="{Binding LoginCampusCommand}" VerticalAlignment="Bottom" Margin="0,0,8,0"/>
+                                <Button Grid.Column="2" Content="保存账号" Style="{StaticResource PrimaryButton}"
+                                        Background="#0EA5E9" Command="{Binding SaveCampusAccountCommand}"
+                                        VerticalAlignment="Bottom"/>
+                            </Grid>
+                            <TextBlock Text="门户地址由网关重定向自动获取，无需配置；密码经 DPAPI 加密后仅存本机。"
+                                       FontSize="11" Foreground="#94A3B8" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
         </Grid>
 
         <!-- 设备与流量 -->
@@ -233,6 +322,8 @@
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock Text="设备与流量" Style="{StaticResource CardTitle}" Margin="0"/>
+                    <TextBlock Text="双击设备名可自定义命名" FontSize="10.5" Foreground="#94A3B8"
+                               VerticalAlignment="Bottom" Margin="10,0,0,2"/>
                     <Button Grid.Column="1" Content="{Binding FloatToggleText}"
                             Command="{Binding ToggleFloatWindowCommand}" Cursor="Hand"
                             Padding="10,4" BorderThickness="0" Foreground="White" FontWeight="SemiBold"

@@ -1,9 +1,11 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Windows.Media;
 using CampusAP.App.Services;
+using CampusAP.Core.CampusAuth;
 using CampusAP.Core.Devices;
 using CampusAP.Core.Hotspot;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -17,6 +19,13 @@ public partial class MainViewModel : ObservableObject
     private readonly TrafficEngine _engine = new();
     private readonly Dictionary<string, (long Up, long Down)> _lastTotals = new();
     private DateTime _lastRateSample = DateTime.UtcNow;
+
+    /// <summary>共享设置实例（MainWindow 的关闭行为与设备命名都读写它，避免双实例互相覆盖）</summary>
+    public AppSettings Settings { get; } = AppSettings.Load();
+
+    // 设备名反向解析：ip -> 主机名（空串=解析失败），解析中的去重
+    private readonly Dictionary<string, string> _hostNameCache = new();
+    private readonly HashSet<string> _resolvingHostNames = new();
 
     [ObservableProperty] private bool capabilityOk;
     [ObservableProperty] private string ssid = "";
@@ -62,6 +71,11 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task InitializeAsync()
     {
+        // 校园网认证（M2）独立于热点能力，先初始化并做首次探测
+        LoadCampusAccount();
+        StartCampusWatchdog();
+        CheckCampusCommand.Execute(null);
+
         IsBusy = true;
         try
         {
@@ -155,6 +169,186 @@ public partial class MainViewModel : ObservableObject
         {
             IsBusy = false;
         }
+    }
+
+    /// <summary>退出流程专用：关闭热点。失败时由调用方决定是否继续退出。</summary>
+    public async Task StopHotspotForExitAsync()
+    {
+        IsBusy = true;
+        try { await _backend.StopAsync(); }
+        finally { IsBusy = false; }
+    }
+
+    // ---- 校园网认证（M2）----
+
+    private readonly EportalClient _eportal = new();
+    private bool _campusBusy;
+    private string? _lastRedirectUrl;
+
+    [ObservableProperty] private CampusAuthState authState = CampusAuthState.Unknown;
+    [ObservableProperty] private string authStatusText = "校园网认证状态未知";
+    [ObservableProperty] private string campusUserId = "";
+    [ObservableProperty] private string campusPassword = "";
+    [ObservableProperty] private string campusService = "";
+    [ObservableProperty] private bool campusAutoRelogin = true;
+    [ObservableProperty] private bool hasSavedAccount;
+
+    partial void OnCampusAutoReloginChanged(bool value)
+    {
+        if (!HasSavedAccount) return;
+        var account = CampusAccountStore.Load();
+        account.AutoRelogin = value;
+        CampusAccountStore.Save(account);
+    }
+
+    private void LoadCampusAccount()
+    {
+        var account = CampusAccountStore.Load();
+        CampusUserId = account.UserId;
+        CampusService = account.Service;
+        CampusPassword = CampusAccountStore.Unprotect(account.PasswordEncrypted);
+        CampusAutoRelogin = account.AutoRelogin;
+        HasSavedAccount = !string.IsNullOrEmpty(account.UserId) && !string.IsNullOrEmpty(account.PasswordEncrypted);
+    }
+
+    [RelayCommand]
+    private async Task CheckCampusAsync()
+    {
+        if (_campusBusy) return;
+        _campusBusy = true;
+        AuthState = CampusAuthState.Checking;
+        AuthStatusText = "正在检测校园网认证状态…";
+        try
+        {
+            ApplyCampusStatus(await _eportal.CheckAsync());
+        }
+        catch (Exception ex)
+        {
+            AuthState = CampusAuthState.Unknown;
+            AuthStatusText = "检测异常：" + ex.Message;
+        }
+        finally { _campusBusy = false; }
+    }
+
+    [RelayCommand]
+    private async Task LoginCampusAsync()
+    {
+        if (_campusBusy) return;
+        if (ValidateCampusInput() is { } inputError) { AuthStatusText = inputError; return; }
+
+        _campusBusy = true;
+        try
+        {
+            // 没有queryString就先探测一次拿门户跳转（顺带把"已在线"的情况挡回去）
+            if (_lastRedirectUrl is null)
+            {
+                AuthState = CampusAuthState.Checking;
+                AuthStatusText = "正在探测门户…";
+                ApplyCampusStatus(await _eportal.CheckAsync());
+                if (AuthState != CampusAuthState.NeedLogin) return;
+            }
+
+            var parsed = EportalClient.ParseRedirect(_lastRedirectUrl);
+            if (parsed is null)
+            {
+                AuthState = CampusAuthState.PortalHijack;
+                AuthStatusText = "无法从门户跳转解析认证参数，请在浏览器手动认证";
+                return;
+            }
+
+            AuthStatusText = "正在登录校园网…";
+            var login = await _eportal.LoginAsync(parsed.Value.PortalDir, parsed.Value.QueryString,
+                CampusUserId.Trim(), CampusPassword, CampusService.Trim());
+            if (!login.Success)
+            {
+                AuthStatusText = "登录失败：" + login.Message;
+                return;
+            }
+
+            // 登录成功后复测一次，用真实连通性更新状态
+            ApplyCampusStatus(await _eportal.CheckAsync());
+            if (AuthState == CampusAuthState.Online) AuthStatusText = "认证成功，网络已连通";
+        }
+        catch (Exception ex)
+        {
+            AuthStatusText = "登录流程异常：" + ex.Message;
+        }
+        finally { _campusBusy = false; }
+    }
+
+    [RelayCommand]
+    private void SaveCampusAccount()
+    {
+        if (ValidateCampusInput() is { } inputError) { AuthStatusText = inputError; return; }
+        CampusAccountStore.Save(new CampusAccount
+        {
+            UserId = CampusUserId.Trim(),
+            Service = CampusService.Trim(),
+            PasswordEncrypted = CampusAccountStore.Protect(CampusPassword),
+            AutoRelogin = CampusAutoRelogin,
+        });
+        HasSavedAccount = true;
+        AuthStatusText = "账号已保存（密码经 DPAPI 加密，仅本机可解密）";
+    }
+
+    private string? ValidateCampusInput()
+    {
+        if (string.IsNullOrWhiteSpace(CampusUserId)) return "校园网账号不能为空";
+        if (string.IsNullOrEmpty(CampusPassword)) return "校园网密码不能为空";
+        return null;
+    }
+
+    private void ApplyCampusStatus(CampusAuthStatus status)
+    {
+        AuthState = status.State;
+        AuthStatusText = status.Detail;
+        _lastRedirectUrl = status.RedirectUrl;
+    }
+
+    /// <summary>看门狗：每 60 秒探测一次；掉线且已保存账号时自动重登</summary>
+    private void StartCampusWatchdog()
+    {
+        var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(60) };
+        timer.Tick += async (_, _) =>
+        {
+            if (_campusBusy) return;
+            _campusBusy = true;
+            try
+            {
+                var status = await _eportal.CheckAsync();
+                ApplyCampusStatus(status);
+                if (status.State != CampusAuthState.NeedLogin || !CampusAutoRelogin) return;
+
+                var account = CampusAccountStore.Load();
+                var password = CampusAccountStore.Unprotect(account.PasswordEncrypted);
+                if (string.IsNullOrEmpty(account.UserId) || string.IsNullOrEmpty(password))
+                {
+                    AuthStatusText = "校园网未认证（尚未保存账号，无法自动重登）";
+                    return;
+                }
+                var parsed = EportalClient.ParseRedirect(status.RedirectUrl);
+                if (parsed is null) return;
+
+                var login = await _eportal.LoginAsync(parsed.Value.PortalDir, parsed.Value.QueryString,
+                    account.UserId, password, account.Service);
+                if (login.Success)
+                {
+                    ApplyCampusStatus(await _eportal.CheckAsync());
+                    if (AuthState == CampusAuthState.Online)
+                        AuthStatusText = "检测到掉线，已自动重新认证";
+                }
+                else
+                {
+                    AuthStatusText = "自动重登失败：" + login.Message;
+                }
+            }
+            catch
+            {
+                // 看门狗单次失败静默，下个周期再试
+            }
+            finally { _campusBusy = false; }
+        };
+        timer.Start();
     }
 
     // ---- 流量管控 ----
@@ -266,6 +460,54 @@ public partial class MainViewModel : ObservableObject
         _engine.SetBlocked(vm.Ip, vm.Blocked);
     }
 
+    // ---- 设备命名 ----
+
+    [RelayCommand]
+    private void RenameDevice(DeviceViewModel? device)
+    {
+        if (device is null) return;
+        var dialog = new DeviceRenameDialog(device.DisplayName);
+        var main = System.Windows.Application.Current.MainWindow;
+        if (main is { IsVisible: true }) dialog.Owner = main;
+        if (dialog.ShowDialog() != true) return;
+
+        device.CustomName = dialog.DeviceName;
+        var key = DeviceNameKey(device);
+        if (device.CustomName.Length == 0)
+            Settings.DeviceNames.Remove(key); // 清空自定义名：回退主机名/IP 显示
+        else
+            Settings.DeviceNames[key] = device.CustomName;
+        Settings.Save();
+    }
+
+    /// <summary>设备名持久化键：优先 MAC（去分隔符大写），无 MAC 用 "ip:地址"</summary>
+    private static string DeviceNameKey(DeviceViewModel device)
+    {
+        var mac = device.Mac.Replace(":", "").Replace("-", "").ToUpperInvariant();
+        return mac.Length == 12 ? mac : "ip:" + device.Ip;
+    }
+
+    /// <summary>尽力解析设备主机名（反向 DNS/mDNS，2.5 秒超时，结果按 IP 缓存）</summary>
+    private async void ResolveHostNameAsync(string ip)
+    {
+        if (_hostNameCache.ContainsKey(ip) || !_resolvingHostNames.Add(ip)) return;
+        string host = "";
+        try
+        {
+            var lookup = Dns.GetHostEntryAsync(ip);
+            if (await Task.WhenAny(lookup, Task.Delay(2500)) == lookup)
+                host = (await lookup).HostName;
+        }
+        catch
+        {
+            // 热点网段通常没有反向解析记录：保持空，显示名回退 IP
+        }
+        _resolvingHostNames.Remove(ip);
+        _hostNameCache[ip] = host;
+        var target = Devices.FirstOrDefault(d => d.Ip == ip);
+        if (target is not null && host.Length > 0) target.HostName = host;
+    }
+
     // ---- 轮询（热点状态 + 设备列表 + 速率）----
 
     /// <summary>
@@ -325,7 +567,10 @@ public partial class MainViewModel : ObservableObject
                 };
                 vm.LimitRequested = OnLimitRequested;
                 vm.BlockRequested = OnBlockRequested;
+                if (Settings.DeviceNames.TryGetValue(DeviceNameKey(vm), out var savedName))
+                    vm.CustomName = savedName;
                 Devices.Add(vm);
+                ResolveHostNameAsync(client.Ip);
             }
 
             var (up, down) = _engine.GetTotals(client.Ip);

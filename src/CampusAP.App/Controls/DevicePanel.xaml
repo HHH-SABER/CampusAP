@@ -63,9 +63,15 @@
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
 
-                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                    <TextBlock Text="{Binding Ip}" FontWeight="SemiBold" Foreground="#0F172A"/>
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center" Background="Transparent"
+                                            MouseLeftButtonDown="DeviceName_LeftButtonDown"
+                                            ToolTipService.ShowDuration="8000"
+                                            ToolTip="双击可修改设备名称">
+                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" Foreground="#0F172A"
+                                               TextTrimming="CharacterEllipsis"/>
                                     <TextBlock Text="{Binding Mac}" Foreground="#94A3B8" FontSize="10.5"/>
+                                    <TextBlock Text="{Binding Ip, StringFormat=IP：{0}}" Foreground="#94A3B8" FontSize="10.5"
+                                               Visibility="{Binding IpLineVisibility}"/>
                                 </StackPanel>
 
                                 <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="4,0">

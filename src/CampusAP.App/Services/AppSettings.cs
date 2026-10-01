@@ -18,6 +18,9 @@ public sealed class AppSettings
 {
     public CloseAction CloseAction { get; set; } = CloseAction.Ask;
 
+    /// <summary>设备自定义名：键为去冒号大写的 MAC（无 MAC 时 "ip:地址"），值可为空串（=清除自定义名）</summary>
+    public Dictionary<string, string> DeviceNames { get; set; } = new();
+
     private static string DirPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CampusAP");
 

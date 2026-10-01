@@ -1,3 +1,4 @@
+using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -8,9 +9,31 @@ public partial class DeviceViewModel : ObservableObject
 {
     [ObservableProperty] private string ip = "";
     [ObservableProperty] private string mac = "";
+
+    /// <summary>用户自定义名（按 MAC 记住，留空=不使用）</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplayName))]
+    [NotifyPropertyChangedFor(nameof(IpLineVisibility))]
+    private string customName = "";
+
+    /// <summary>反向解析得到的主机名（尽力而为，解析失败为空）</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplayName))]
+    [NotifyPropertyChangedFor(nameof(IpLineVisibility))]
+    private string hostName = "";
+
     [ObservableProperty] private string downRate = "—";
     [ObservableProperty] private string upRate = "—";
     [ObservableProperty] private string totalText = "—";
+
+    /// <summary>列表首行显示名：自定义名 > 主机名 > IP</summary>
+    public string DisplayName =>
+        !string.IsNullOrWhiteSpace(CustomName) ? CustomName
+        : !string.IsNullOrWhiteSpace(HostName) ? HostName
+        : Ip;
+
+    /// <summary>显示名已不是 IP 时，在下方补一行小字 IP（否则与首行重复）</summary>
+    public Visibility IpLineVisibility => DisplayName == Ip ? Visibility.Collapsed : Visibility.Visible;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(BlockText))]

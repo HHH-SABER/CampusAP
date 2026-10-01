@@ -2,16 +2,17 @@ using System.ComponentModel;
 using System.Windows;
 using CampusAP.App.Services;
 using CampusAP.App.ViewModels;
+using CampusAP.Core.Hotspot;
 
 namespace CampusAP.App;
 
 public partial class MainWindow : Window
 {
     private readonly MainViewModel _viewModel = new();
-    private readonly AppSettings _settings = AppSettings.Load();
     private readonly H.NotifyIcon.TaskbarIcon _trayIcon;
     private bool _forceClose;
     private bool _balloonShown;
+    private bool _hotspotExitConfirmed;
 
     public MainWindow()
     {
@@ -20,6 +21,8 @@ public partial class MainWindow : Window
         Loaded += (_, _) => _viewModel.InitializeCommand.Execute(null);
         _trayIcon = (H.NotifyIcon.TaskbarIcon)FindResource("TrayIcon");
         _viewModel.FloatToggleRequested += () => Dispatcher.Invoke(ToggleFloatWindow);
+        // Windows 注销/关机时不弹任何确认框，随系统直接结束
+        Application.Current.SessionEnding += (_, _) => _forceClose = true;
         Application.Current.Exit += (_, _) =>
         {
             _trayIcon.Visibility = Visibility.Collapsed;
@@ -73,7 +76,7 @@ public partial class MainWindow : Window
     {
         if (!_forceClose)
         {
-            var action = _settings.CloseAction;
+            var action = _viewModel.Settings.CloseAction;
             if (action == CloseAction.Ask)
             {
                 var dialog = new CloseBehaviorDialog { Owner = this };
@@ -82,8 +85,8 @@ public partial class MainWindow : Window
                     action = dialog.Choice;
                     if (dialog.RememberChoice)
                     {
-                        _settings.CloseAction = action;
-                        _settings.Save();
+                        _viewModel.Settings.CloseAction = action;
+                        _viewModel.Settings.Save();
                     }
                 }
                 else
@@ -111,10 +114,47 @@ public partial class MainWindow : Window
             }
         }
 
+        // 热点由系统托管：程序退出后 Windows 会继续共享网络（这次交接时“程序消失但手机仍连着”的根源）。
+        // 真正退出前给用户一次选择，覆盖窗口退出/托盘退出/记住的直接退出三条路径。
+        if (!_hotspotExitConfirmed && _viewModel.State == HotspotState.On)
+        {
+            e.Cancel = true;
+            ConfirmExitWithHotspotOn();
+            return;
+        }
+
         // 真正退出：清理托盘图标
         _trayIcon.Visibility = Visibility.Collapsed;
         _trayIcon.Dispose();
         Application.Current.Shutdown();
         base.OnClosing(e);
+    }
+
+    private async void ConfirmExitWithHotspotOn()
+    {
+        var result = System.Windows.MessageBox.Show(
+            "校园网热点仍在运行。退出后系统会继续共享网络，已连接的设备仍可上网。\n\n" +
+            "「是」：关闭热点并退出\n" +
+            "「否」：仅退出程序，热点保持开启\n" +
+            "「取消」：返回程序",
+            "热点仍在运行",
+            System.Windows.MessageBoxButton.YesNoCancel,
+            System.Windows.MessageBoxImage.Question);
+
+        if (result == System.Windows.MessageBoxResult.Cancel)
+        {
+            _forceClose = false; // 撤销托盘退出等路径留下的标记，恢复常规关闭流程
+            return;
+        }
+
+        if (result == System.Windows.MessageBoxResult.Yes)
+        {
+            try { await _viewModel.StopHotspotForExitAsync(); }
+            catch { /* 关闭热点失败时按用户所选行为继续退出 */ }
+        }
+
+        _hotspotExitConfirmed = true;
+        _forceClose = true;
+        Close();
     }
 }
