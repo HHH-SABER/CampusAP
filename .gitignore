@@ -1,0 +1,15 @@
+# 构建产物
+bin/
+obj/
+publish/
+发布/
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+
+# 运行时配置（含用户偏好，不入库）
+*.lnk
+.mimosa/
