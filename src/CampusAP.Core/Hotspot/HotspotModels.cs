@@ -34,4 +34,4 @@ public enum HotspotBand
 }
 
 /// <summary>一台已连接到热点的设备（系统 tethering API 视角）</summary>
-public record TetheringClientInfo(string Ip, string Mac);
+public record TetheringClientInfo(string Ip, string Mac, string? Ipv6 = null);

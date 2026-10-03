@@ -6,7 +6,7 @@ namespace CampusAP.Core.CampusAuth;
 
 public enum CampusAuthState
 {
-    Unknown, Checking, Online, NeedLogin, PortalHijack, NoInternet,
+    Unknown, Checking, Online, PlainOnline, NeedLogin, PortalHijack, NoInternet,
 }
 
 /// <summary>门户类型（从 302 重定向 URL 自动识别）</summary>
@@ -49,7 +49,7 @@ public sealed class EportalClient : IDisposable
         { Timeout = TimeSpan.FromSeconds(6) };
     }
 
-    public async Task<CampusAuthStatus> CheckAsync(CancellationToken ct = default)
+    public async Task<CampusAuthStatus> CheckAsync(bool hasCampusAccount, CancellationToken ct = default)
     {
         try
         {
@@ -57,10 +57,14 @@ public sealed class EportalClient : IDisposable
             if (resp.StatusCode == HttpStatusCode.OK)
             {
                 var body = await resp.Content.ReadAsStringAsync(ct);
-                return body.Contains(CheckBodyMarker, StringComparison.OrdinalIgnoreCase)
-                    ? new CampusAuthStatus(CampusAuthState.Online, "校园网认证有效，网络连通正常")
-                    : new CampusAuthStatus(CampusAuthState.PortalHijack,
+                if (!body.Contains(CheckBodyMarker, StringComparison.OrdinalIgnoreCase))
+                    return new CampusAuthStatus(CampusAuthState.PortalHijack,
                         "HTTP 请求被网关替换内容（无跳转地址可解析），请在浏览器手动认证");
+
+                // 能直连上网：配了校园账号=认证后在线，没配=普通网络
+                return hasCampusAccount
+                    ? new CampusAuthStatus(CampusAuthState.Online, "校园网认证有效，网络连通正常")
+                    : new CampusAuthStatus(CampusAuthState.PlainOnline, "普通网络，此模块未激活");
             }
 
             if (resp.Headers.Location is not null)

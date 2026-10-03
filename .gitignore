@@ -25,3 +25,7 @@ settings.local.json
 # ===== 系统杂项 =====
 Thumbs.db
 .DS_Store
+
+# 安装包
+安装包/
+发布/

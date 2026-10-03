@@ -100,13 +100,10 @@
             <Setter Property="Fill" Value="#94A3B8"/>
             <Style.Triggers>
                 <DataTrigger Binding="{Binding AuthState}" Value="{x:Static ca:CampusAuthState.Online}">
-                    <Setter Property="Fill" Value="#22C55E"/>
-                </DataTrigger>
-                <DataTrigger Binding="{Binding AuthState}" Value="{x:Static ca:CampusAuthState.Checking}">
-                    <Setter Property="Fill" Value="#F59E0B"/>
+                    <Setter Property="Fill" Value="#3B82F6"/>
                 </DataTrigger>
                 <DataTrigger Binding="{Binding AuthState}" Value="{x:Static ca:CampusAuthState.NeedLogin}">
-                    <Setter Property="Fill" Value="#F59E0B"/>
+                    <Setter Property="Fill" Value="#EF4444"/>
                 </DataTrigger>
                 <DataTrigger Binding="{Binding AuthState}" Value="{x:Static ca:CampusAuthState.PortalHijack}">
                     <Setter Property="Fill" Value="#EF4444"/>
@@ -220,6 +217,8 @@
                             <TextBlock Text="能力检测与诊断" Style="{StaticResource CardTitle}"/>
                             <TextBlock Text="{Binding DiagnosisText}" TextWrapping="Wrap"
                                        Foreground="#334155" LineHeight="20"/>
+                            <TextBlock Text="{Binding NetworkEnvText}" TextWrapping="Wrap" Margin="0,6,0,0"
+                                       Foreground="#64748B" FontSize="11.5"/>
                         </StackPanel>
                     </Border>
                 </StackPanel>
@@ -271,7 +270,7 @@
                                 <CheckBox Grid.Column="2" Content="掉线自动重登" IsChecked="{Binding CampusAutoRelogin}"
                                           VerticalAlignment="Center" FontSize="12" Foreground="#64748B"/>
                             </Grid>
-                            <Grid Margin="0,6,0,0">
+                            <Grid Margin="0,6,0,0" IsEnabled="{Binding AuthFormEnabled}">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="1.1*"/>
                                     <ColumnDefinition Width="1*"/>
@@ -285,7 +284,7 @@
                                     <TextBox Text="{Binding CampusPassword, UpdateSourceTrigger=PropertyChanged}"/>
                                 </StackPanel>
                             </Grid>
-                            <Grid Margin="0,10,0,0">
+                            <Grid Margin="0,10,0,0" IsEnabled="{Binding AuthFormEnabled}">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="Auto"/>

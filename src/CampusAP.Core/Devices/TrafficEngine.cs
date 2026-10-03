@@ -12,10 +12,12 @@ namespace CampusAP.Core.Devices;
 /// </summary>
 public sealed class TrafficEngine : IDisposable
 {
-    /// <summary>Win10 移动热点私有网段（ICS 默认 192.168.137.0/24）</summary>
+    /// <summary>Win10 移动热点私有网段（ICS 默认 IPv4 192.168.137.0/24 + IPv6 fe80::/10 链路本地）</summary>
     private const string SubnetFilter =
-        "(ip.SrcAddr >= 192.168.137.0 and ip.SrcAddr <= 192.168.137.255) or " +
-        "(ip.DstAddr >= 192.168.137.0 and ip.DstAddr <= 192.168.137.255)";
+        "((ip.SrcAddr >= 192.168.137.0 and ip.SrcAddr <= 192.168.137.255) or " +
+        "(ip.DstAddr >= 192.168.137.0 and ip.DstAddr <= 192.168.137.255)) or " +
+        "(ipv6.SrcAddr >= fe80:: and ipv6.SrcAddr <= fe80::ffff:ffff:ffff:ffff) or " +
+        "(ipv6.DstAddr >= fe80:: and ipv6.DstAddr <= fe80::ffff:ffff:ffff:ffff)";
 
     /// <summary>目标 TTL：手机包经 NAT 后减1，设为 129 让网关收到 127（与 Windows 直发一致）</summary>
     private const int UpstreamTtl = 129;

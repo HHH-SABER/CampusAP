@@ -46,18 +46,18 @@ public sealed class TetheringBackend : IDisposable
         try
         {
             _manager = NetworkOperatorTetheringManager.CreateFromConnectionProfile(profile);
+            var config = _manager.GetCurrentAccessPointConfiguration();
+            return new CapabilityReport(true,
+                $"热点可用。出口网络：「{profileName}」。网卡最大客户端数：{_manager.MaxClientCount}。",
+                profileName, capability.ToString(), config.Ssid, config.Passphrase);
         }
         catch (Exception ex)
         {
+            _manager = null;
             return new CapabilityReport(false,
-                $"无法为网络「{profileName}」创建热点管理器：{ex.Message}",
+                $"无法初始化热点管理器：{ex.Message}。网络就绪后请重试。",
                 profileName, null, null, null);
         }
-
-        var config = _manager.GetCurrentAccessPointConfiguration();
-        return new CapabilityReport(true,
-            $"热点可用。出口网络：「{profileName}」。网卡最大客户端数：{_manager.MaxClientCount}。",
-            profileName, capability.ToString(), config.Ssid, config.Passphrase);
     }
 
     /// <summary>打开热点</summary>
@@ -113,23 +113,20 @@ public sealed class TetheringBackend : IDisposable
         return (config.Ssid, config.Passphrase ?? "", ToHotspotBand(config.Band));
     }
 
-    /// <summary>读取当前已连接热点的设备列表（IP + MAC），系统权威数据</summary>
+    /// <summary>读取当前已连接热点的设备列表（IPv4 + IPv6 + MAC），系统权威数据</summary>
     public List<TetheringClientInfo> GetClients()
     {
         var manager = RequireManager();
         var result = new List<TetheringClientInfo>();
         foreach (var client in manager.GetTetheringClients())
         {
-            string? ip = null;
+            string? ipv4 = null, ipv6 = null;
             foreach (var host in client.HostNames)
             {
-                if (host.Type == Windows.Networking.HostNameType.Ipv4)
-                {
-                    ip = host.DisplayName;
-                    break;
-                }
+                if (host.Type == Windows.Networking.HostNameType.Ipv4) ipv4 ??= host.DisplayName;
+                else if (host.Type == Windows.Networking.HostNameType.Ipv6) ipv6 ??= host.DisplayName;
             }
-            if (ip is not null) result.Add(new TetheringClientInfo(ip, client.MacAddress ?? ""));
+            if (ipv4 is not null) result.Add(new TetheringClientInfo(ipv4, client.MacAddress ?? "", ipv6));
         }
         return result;
     }

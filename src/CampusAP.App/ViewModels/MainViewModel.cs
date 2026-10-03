@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Windows;
 using System.Windows.Media;
 using CampusAP.App.Services;
 using CampusAP.Core.CampusAuth;
@@ -108,31 +109,7 @@ public partial class MainViewModel : ObservableObject
         IsBusy = true;
         try
         {
-            var report = _backend.CheckCapability();
-            DiagnosisText = report.Diagnosis;
-            if (!report.Supported)
-            {
-                State = HotspotState.Unsupported;
-                StatusText = "本机暂不支持开热点";
-                return;
-            }
-
-            CapabilityOk = true;
-            var (ssid, password, band) = _backend.ReadCurrentConfig();
-            Ssid = ssid;
-            Password = password;
-            BandIndex = (int)band;
-
-            var status = _backend.PeekStatus();
-            State = status.State;
-            ClientCount = status.ClientCount;
-            StatusText = status.State == HotspotState.On ? "热点运行中" : "热点未开启";
-            UpdateQr();
-            StartPolling();
-
-            // 从管理员重启场景带参启动：自动开启流量管控
-            if (Environment.GetCommandLineArgs().Contains("--start-engine"))
-                ToggleControlCommand.Execute(null);
+            await TryInitializeAsync();
         }
         catch (Exception ex)
         {
@@ -143,6 +120,83 @@ public partial class MainViewModel : ObservableObject
         {
             IsBusy = false;
         }
+    }
+
+    private CancellationTokenSource? _retryCts;
+
+    private async Task TryInitializeAsync()
+    {
+        for (int attempt = 1; attempt <= 12; attempt++)  // 最多重试12次=60秒
+        {
+            try
+            {
+                var report = _backend.CheckCapability();
+                DiagnosisText = report.Diagnosis;
+                if (!report.Supported)
+                {
+                    // 网络没就绪：等5秒重试，不直接判死刑
+                    if (attempt < 12)
+                    {
+                        StatusText = $"等待网络就绪…（第{attempt}次检测）";
+                        await Task.Delay(5000);
+                        continue;
+                    }
+                    State = HotspotState.Unsupported;
+                    StatusText = "本机暂不支持开热点";
+                    return;
+                }
+
+                CapabilityOk = true;
+                var (ssid, password, band) = _backend.ReadCurrentConfig();
+                Ssid = ssid;
+                Password = password;
+                BandIndex = (int)band;
+
+                var status = _backend.PeekStatus();
+                State = status.State;
+                ClientCount = status.ClientCount;
+                StatusText = status.State == HotspotState.On ? "热点运行中" : "热点未开启";
+                UpdateQr();
+                StartPolling();
+
+                // 启动时后台检查更新（不阻塞主流程）
+                _ = CheckUpdateAsync();
+
+                if (Environment.GetCommandLineArgs().Contains("--start-engine"))
+                    ToggleControlCommand.Execute(null);
+                return;  // 成功，退出重试循环
+            }
+            catch
+            {
+                if (attempt >= 12) throw;
+                StatusText = $"热点初始化异常，5秒后重试…（{attempt}/12）";
+                await Task.Delay(5000);
+            }
+        }
+    }
+
+    private async Task CheckUpdateAsync()
+    {
+        try
+        {
+            var checker = new Core.Update.UpdateChecker();
+            var current = GetType().Assembly.GetName().Version?.ToString() ?? "0.1.0";
+            var (hasUpdate, ver, url) = await checker.CheckAsync(current);
+            if (hasUpdate)
+            {
+                await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    var r = System.Windows.MessageBox.Show(
+                        $"发现新版本 v{ver}，是否前往下载？",
+                        "CampusAP 更新",
+                        System.Windows.MessageBoxButton.YesNo,
+                        System.Windows.MessageBoxImage.Information);
+                    if (r == System.Windows.MessageBoxResult.Yes && !string.IsNullOrEmpty(url))
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+                });
+            }
+        }
+        catch { }
     }
 
     [RelayCommand(CanExecute = nameof(CanToggle))]
@@ -250,7 +304,7 @@ public partial class MainViewModel : ObservableObject
         AuthStatusText = "正在检测校园网认证状态…";
         try
         {
-            ApplyCampusStatus(await _eportal.CheckAsync());
+            ApplyCampusStatus(await _eportal.CheckAsync(!string.IsNullOrWhiteSpace(CampusUserId)));
         }
         catch (Exception ex)
         {
@@ -274,7 +328,7 @@ public partial class MainViewModel : ObservableObject
             {
                 AuthState = CampusAuthState.Checking;
                 AuthStatusText = "正在探测门户…";
-                ApplyCampusStatus(await _eportal.CheckAsync());
+                ApplyCampusStatus(await _eportal.CheckAsync(!string.IsNullOrWhiteSpace(CampusUserId)));
                 if (AuthState != CampusAuthState.NeedLogin) return;
             }
 
@@ -296,8 +350,8 @@ public partial class MainViewModel : ObservableObject
             }
 
             // 登录成功后复测一次，用真实连通性更新状态
-            ApplyCampusStatus(await _eportal.CheckAsync());
-            if (AuthState == CampusAuthState.Online) AuthStatusText = "认证成功，网络已连通";
+            ApplyCampusStatus(await _eportal.CheckAsync(!string.IsNullOrWhiteSpace(CampusUserId)));
+            if (AuthState == CampusAuthState.Online) AuthStatusText = "正在使用校园网";
         }
         catch (Exception ex)
         {
@@ -328,13 +382,46 @@ public partial class MainViewModel : ObservableObject
         return null;
     }
 
+    private string? _networkEnvText;
+    /// <summary>能力检测模块显示的网络环境判断</summary>
+    public string? NetworkEnvText
+    {
+        get => _networkEnvText;
+        set => SetProperty(ref _networkEnvText, value);
+    }
+
     private void ApplyCampusStatus(CampusAuthStatus status)
     {
         AuthState = status.State;
-        AuthStatusText = status.Detail;
         _lastRedirectUrl = status.RedirectUrl;
         _lastPortalKind = status.Kind;
+
+        // 校园网认证卡片：状态灯 + 简短状态
+        AuthStatusText = status.State switch
+        {
+            CampusAuthState.PlainOnline => "未激活",
+            CampusAuthState.NeedLogin => "校园网络环境，请登录或激活校园网",
+            CampusAuthState.Online => "正在使用校园网",
+            CampusAuthState.NoInternet => "无网络连接",
+            CampusAuthState.Checking => "检测中…",
+            _ => status.Detail,
+        };
+
+        // 能力检测模块：网络环境判断
+        NetworkEnvText = status.State switch
+        {
+            CampusAuthState.PlainOnline => "普通网络，校园网认证模块未激活",
+            CampusAuthState.NeedLogin => "校园网络环境，尚未登录",
+            CampusAuthState.Online => "校园网络环境，已登录",
+            CampusAuthState.NoInternet => "无网络连接",
+            _ => null,
+        };
+
+        OnPropertyChanged(nameof(AuthFormEnabled));
     }
+
+    /// <summary>普通网络时表单禁用</summary>
+    public bool AuthFormEnabled => AuthState != CampusAuthState.PlainOnline;
 
     /// <summary>看门狗：每 60 秒探测一次；掉线且已保存账号时自动重登</summary>
     private void StartCampusWatchdog()
@@ -346,7 +433,7 @@ public partial class MainViewModel : ObservableObject
             _campusBusy = true;
             try
             {
-                var status = await _eportal.CheckAsync();
+                var status = await _eportal.CheckAsync(!string.IsNullOrWhiteSpace(CampusUserId));
                 ApplyCampusStatus(status);
                 if (status.State != CampusAuthState.NeedLogin || !CampusAutoRelogin) return;
 
@@ -364,7 +451,7 @@ public partial class MainViewModel : ObservableObject
                     account.UserId, password, account.Service, status.Kind);
                 if (login.Success)
                 {
-                    ApplyCampusStatus(await _eportal.CheckAsync());
+                    ApplyCampusStatus(await _eportal.CheckAsync(!string.IsNullOrWhiteSpace(CampusUserId)));
                     if (AuthState == CampusAuthState.Online)
                         AuthStatusText = "检测到掉线，已自动重新认证";
                 }
@@ -606,7 +693,12 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (EngineRunning) _engine.SetClients(clients.Select(c => c.Ip));
+        if (EngineRunning)
+        {
+            var allIps = clients.Select(c => c.Ip).ToList();
+            foreach (var c in clients) if (!string.IsNullOrEmpty(c.Ipv6)) allIps.Add(c.Ipv6);
+            _engine.SetClients(allIps);
+        }
 
         var elapsed = (DateTime.UtcNow - _lastRateSample).TotalSeconds;
         _lastRateSample = DateTime.UtcNow;

@@ -13,7 +13,7 @@ public partial class FloatWindow : Window
         {
             var work = SystemParameters.WorkArea;
             Left = work.Right - Width - 24;
-            Top = work.Bottom - Height - 24;
+            Top = work.Bottom - ActualHeight - 24;
         };
     }
 
