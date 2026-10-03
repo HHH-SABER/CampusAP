@@ -47,7 +47,6 @@ public sealed class TrafficEngine : IDisposable
     private Thread? _f4Thread, _f6Thread, _n4Thread, _n6Thread;
     private volatile bool _running;
 
-    private readonly HashSet<string> _subnetBases = new() { DefaultSubnetBase };
     private readonly object _lifecycleLock = new();
 
     // ---- 自诊断计数 ----
@@ -73,7 +72,9 @@ public sealed class TrafficEngine : IDisposable
         {
             if (_running) return;
 
-            _f4 = WinDivert.WinDivertOpen(BuildV4Filter(_subnetBases), WinDivertLayer.Forward, 10, WinDivertOpenFlags.Sniff);
+            // 观察层必须全量抓取：既要 NAT 前副本（137.x，识别设备）也要 NAT 后副本（宿主地址，携带 NAT 端口）。
+            // 若过滤器只放行 137 网段，NAT 后副本进不来，流映射表永远为空 → 执行层全部未映射（真机教训）。
+            _f4 = WinDivert.WinDivertOpen("true", WinDivertLayer.Forward, 10, WinDivertOpenFlags.Sniff);
             _f6 = WinDivert.WinDivertOpen("ipv6", WinDivertLayer.Forward, 10, WinDivertOpenFlags.Sniff);
             _n4 = WinDivert.WinDivertOpen("!loopback", WinDivertLayer.Network, 0, WinDivertOpenFlags.None);
             _n6 = WinDivert.WinDivertOpen("ipv6 and !loopback", WinDivertLayer.Network, 0, WinDivertOpenFlags.None);
@@ -142,28 +143,7 @@ public sealed class TrafficEngine : IDisposable
             }
         }
 
-        // Forward 观察层 v4 过滤器需覆盖新网段（Win11 随机网段），变化则重开 F4
-        var bases = new HashSet<string>();
-        foreach (var ip in set)
-        {
-            var octets = ip.Split('.');
-            if (octets.Length == 4 && octets.All(o => byte.TryParse(o, out _)))
-                bases.Add($"{octets[0]}.{octets[1]}.{octets[2]}");
-        }
-        bases.Add(DefaultSubnetBase);
-        if (bases.Count > 8) bases = new HashSet<string> { DefaultSubnetBase };
-
-        lock (_lifecycleLock)
-        {
-            if (_subnetBases.IsSubsetOf(bases) && bases.IsSubsetOf(_subnetBases)) return;
-            _subnetBases.Clear();
-            foreach (var b in bases) _subnetBases.Add(b);
-            Logging.Log.Info($"网段表更新: {string.Join(";", _subnetBases)}（重开观察层 v4 句柄）");
-            if (!_running) return;
-            var old = _f4;
-            _f4 = WinDivert.WinDivertOpen(BuildV4Filter(_subnetBases), WinDivertLayer.Forward, 10, WinDivertOpenFlags.Sniff);
-            if (old != IntPtr.Zero) WinDivert.WinDivertClose(old);
-        }
+        Logging.Log.Info($"设备表同步: {set.Count} 台（{string.Join(", ", set)}）");
     }
 
     /// <summary>设置限速（字节/秒，0=不限）。即时生效。</summary>
@@ -224,16 +204,6 @@ public sealed class TrafficEngine : IDisposable
         foreach (var h in new[] { _f4, _f6, _n4, _n6 })
             if (h != IntPtr.Zero) WinDivert.WinDivertClose(h);
         _f4 = _f6 = _n4 = _n6 = IntPtr.Zero;
-    }
-
-    /// <summary>构造 Forward 观察层 v4 过滤器。纪律：只允许 IPv4 比较子句——IPv6 比较子句混入
-    /// 会使整个过滤器静默失配（探针对照实验实证）。</summary>
-    private static string BuildV4Filter(IEnumerable<string> bases)
-    {
-        var v4 = string.Join(" or ", bases.Select(b =>
-            $"(ip.SrcAddr >= {b}.0 and ip.SrcAddr <= {b}.255) or " +
-            $"(ip.DstAddr >= {b}.0 and ip.DstAddr <= {b}.255)"));
-        return $"({v4})";
     }
 
     /// <summary>读宿主默认 TTL（注册表 Tcpip\Parameters\DefaultTtl；Win11 24H2 为 64，老系统 128）</summary>
