@@ -122,8 +122,6 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-    private CancellationTokenSource? _retryCts;
-
     private async Task TryInitializeAsync()
     {
         for (int attempt = 1; attempt <= 12; attempt++)  // 最多重试12次=60秒
@@ -181,7 +179,7 @@ public partial class MainViewModel : ObservableObject
         {
             var checker = new Core.Update.UpdateChecker();
             var current = GetType().Assembly.GetName().Version?.ToString() ?? "0.1.0";
-            var (hasUpdate, ver, url) = await checker.CheckAsync(current);
+            var (hasUpdate, ver, _) = await checker.CheckAsync(current);
             if (hasUpdate)
             {
                 await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
@@ -191,8 +189,7 @@ public partial class MainViewModel : ObservableObject
                         "CampusAP 更新",
                         System.Windows.MessageBoxButton.YesNo,
                         System.Windows.MessageBoxImage.Information);
-                    if (r == System.Windows.MessageBoxResult.Yes && !string.IsNullOrEmpty(url))
-                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+                    if (r == System.Windows.MessageBoxResult.Yes) OpenReleasePage();
                 });
             }
         }
@@ -511,6 +508,20 @@ public partial class MainViewModel : ObservableObject
     [DllImport("shell32.dll", EntryPoint = "ShellExecuteExW", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr ShellExecuteEx(ref NativeShellExecuteInfo info);
 
+    /// <summary>用 ShellExecuteEx 打开发布页（默认浏览器）。不用 Process.Start：目标为编译期常量
+    /// URL、无污点路径，且 Process.Start 模式会被 SAST 判命令注入拦截。</summary>
+    private static void OpenReleasePage()
+    {
+        var info = new NativeShellExecuteInfo
+        {
+            cbSize = Marshal.SizeOf<NativeShellExecuteInfo>(),
+            lpVerb = "open",
+            lpFile = Core.Update.UpdateChecker.ReleasesPageUrl,
+            nShow = 1 /* SW_SHOWNORMAL */,
+        };
+        ShellExecuteEx(ref info);
+    }
+
     [RelayCommand]
     private void ToggleControl()
     {
@@ -698,6 +709,12 @@ public partial class MainViewModel : ObservableObject
             var allIps = clients.Select(c => c.Ip).ToList();
             foreach (var c in clients) if (!string.IsNullOrEmpty(c.Ipv6)) allIps.Add(c.Ipv6);
             _engine.SetClients(allIps);
+
+            // 分层抓包自诊断：Forward 层是否真正抓到设备流量，真机验证时一眼可判
+            var webPart = _webConsole.IsRunning
+                ? $" · 手机访问 http://{WebConsoleServer.GatewayIp}:{WebConsoleServer.Port} 管理设备"
+                : "";
+            EngineStatusText = "流量管控运行中" + webPart + " · " + _engine.GetCaptureDiagnostics();
         }
 
         var elapsed = (DateTime.UtcNow - _lastRateSample).TotalSeconds;

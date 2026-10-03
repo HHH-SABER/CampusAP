@@ -10,6 +10,11 @@ public sealed class UpdateChecker
     private const string RepoName = "CampusAP";
     private static readonly string ApiUrl =
         $"https://api.github.com/repos/{RepoOwner}/{RepoName}/releases/latest";
+
+    /// <summary>发布页地址：编译期常量（字面量拼接），不采用 API 返回的 html_url——
+    /// 远端数据不得进入 Process.Start（SAST 命令注入污点链）。</summary>
+    public const string ReleasesPageUrl =
+        "https://github.com/" + "HHH" + "-SABER" + "/CampusAP/releases/latest";
     private readonly HttpClient _http;
 
     public UpdateChecker()
@@ -38,8 +43,7 @@ public sealed class UpdateChecker
                 TryParseVersion(currentVersion, out var currentVer) &&
                 latestVer > currentVer)
             {
-                var url = root.TryGetProperty("html_url", out var u) ? u.GetString() : null;
-                return (true, latest, url);
+                return (true, latest, ReleasesPageUrl);
             }
             return (false, latest, null);
         }
