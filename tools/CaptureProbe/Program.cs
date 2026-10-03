@@ -5,15 +5,32 @@ using WinDivertSharp;
 // Network 层（to/from local machine）与 Forward 层（passing through）全量抓 12 秒，
 // 输出每层的包数/方向/TTL 分布/五元组样本，用于判断本机热点 NAT 的转发路径
 // 到底经过哪一层、地址是否已被转换（决定限速/流量统计的最终技术方案）。
-// 用法：右键管理员运行 tools/CaptureProbe/run_probe.bat；抓包期间手机保持高速流量。
+// 用法：交互模式直接运行；代理运行用 --auto <日志文件>（免交互、输出落文件）。
 
 const int DurationSeconds = 12;
 
+string? logPath = args.FirstOrDefault() == "--auto" ? args.ElementAtOrDefault(1) : null;
+
+void P(string s)
+{
+    Console.WriteLine(s);
+    if (logPath is not null)
+        File.AppendAllText(logPath, s + Environment.NewLine, System.Text.Encoding.UTF8);
+}
+
 Console.OutputEncoding = System.Text.Encoding.UTF8;
-Console.WriteLine("=== WinDivert 抓包层诊断探针 ===");
-Console.WriteLine($"将全量抓取 {DurationSeconds} 秒（filter=true，两层），期间网络经本程序中转，属正常现象。");
-Console.WriteLine("请确保：手机已连热点，且正在跑流量（测速/视频）。按回车开始…");
-Console.ReadLine();
+if (logPath is not null && File.Exists(logPath)) File.Delete(logPath);
+P("=== WinDivert 抓包层诊断探针 ===");
+P($"将全量抓取 {DurationSeconds} 秒（filter=true，两层），期间网络经本程序中转，属正常现象。");
+if (logPath is null)
+{
+    Console.WriteLine("请确保：手机已连热点，且正在跑流量（测速/视频）。按回车开始…");
+    Console.ReadLine();
+}
+else
+{
+    P($"免交互模式，结果将写入 {logPath}");
+}
 
 var layers = new Dictionary<WinDivertLayer, LayerStat>
 {
@@ -27,7 +44,7 @@ foreach (var layer in layers.Keys.ToList())
     if (handle == IntPtr.Zero)
     {
         var err = Marshal.GetLastWin32Error();
-        Console.WriteLine($"[{layer}] 打开失败：Win32 错误码 {err}（5=需要管理员，2=缺 WinDivert 文件）");
+        P($"[{layer}] 打开失败：Win32 错误码 {err}（5=需要管理员，2=缺 WinDivert 文件）");
         layers.Remove(layer);
         continue;
     }
@@ -37,29 +54,37 @@ foreach (var layer in layers.Keys.ToList())
     thread.Start();
 }
 
-Console.WriteLine($"抓包中… {DurationSeconds} 秒");
+P($"抓包中… {DurationSeconds} 秒");
 foreach (var stat in layers.Values) stat.Thread?.Join();
 
-Console.WriteLine();
+P("");
 foreach (var kv in layers)
 {
     var s = kv.Value;
-    Console.WriteLine($"===== {kv.Key} 层 =====");
-    Console.WriteLine($"总包数 {s.Total}（IPv4 {s.V4}，IPv6/其他 {s.Total - s.V4}）");
-    Console.WriteLine($"方向：outbound={s.Outbound}  inbound={s.Inbound}");
-    Console.WriteLine("TTL 分布（IPv4 出向样本）：" +
+    P($"===== {kv.Key} 层 =====");
+    P($"总包数 {s.Total}（IPv4 {s.V4}，IPv6/其他 {s.Total - s.V4}）");
+    P($"方向：outbound={s.Outbound}  inbound={s.Inbound}");
+    P("TTL 分布（IPv4 样本）：" +
         (s.TtlHist.Count == 0 ? "无" : string.Join("  ", s.TtlHist.OrderBy(x => x.Key).Select(x => $"TTL{x.Key}×{x.Value}"))));
-    Console.WriteLine("样本（src:port → dst:port 协议 TTL）：");
-    foreach (var line in s.Samples.Take(40)) Console.WriteLine("  " + line);
-    Console.WriteLine();
+    P("样本（src:port → dst:port 协议 TTL）：");
+    foreach (var line in s.Samples.Take(40)) P("  " + line);
+    P("");
 }
 
-Console.WriteLine("解读提示：");
-Console.WriteLine("· 若 Forward 层 0 包：转发流量不经过 IPFORWARD（winnat 连接重定向型 NAT），WinDivert 无法按设备管控；");
-Console.WriteLine("· 若 Forward 层有包但地址全为出口 IP：NAT 在 IPFORWARD 前完成，同样无法按设备归属；");
-Console.WriteLine("· 若 Forward 层有 192.168.137.x 源地址的包：可在 Forward 层做按设备统计与管控（回到 v0.2.2 设计预期）。");
-Console.WriteLine("\n按回车退出（关闭前会自动 Ctrl-C 线程）…");
-Console.ReadLine();
+P("解读提示：");
+P("· 若 Forward 层 0 包：转发流量不经过 IPFORWARD（winnat 连接重定向型 NAT），WinDivert 无法按设备管控；");
+P("· 若 Forward 层有包但地址全为出口 IP：NAT 在 IPFORWARD 前完成，同样无法按设备归属；");
+P("· 若 Forward 层有 192.168.137.x 源地址的包：可在 Forward 层做按设备统计与管控（回到 v0.2.2 设计预期）。");
+
+if (logPath is null)
+{
+    Console.WriteLine("\n按回车退出…");
+    Console.ReadLine();
+}
+else
+{
+    P($"=== 探针完成，结果已写入 {logPath} ===");
+}
 Environment.Exit(0);
 
 static void Capture(IntPtr handle, LayerStat stat, int seconds)
