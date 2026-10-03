@@ -11,27 +11,25 @@ namespace CampusAP.Core.Devices;
 /// 按设备计数上下行、令牌桶限速（超额丢包，由 TCP 拥塞控制自然回压）、整包丢弃实现拉黑。
 /// 需要管理员权限（加载 WinDivert 内核驱动）。
 ///
-/// 抓包采用双层结构（v0.2.2 修复"速率统计为 0"）：
-/// - Forward 层（主）：WinDivert 的 Forward 层挂在 WFP IPFORWARD 层，转发路径上的包尚未经
-///   Windows NAT（ICS/winnat），源/目的仍是 192.168.137.x 原始地址，能按设备归属计数。
-///   Network 层定义是"to/from the local machine"，转发（transit）流量根本不经过它——这是
-///   v0.2.1 及之前速率恒为 0 的根因。官方文档警告 Forward 层与 Windows NAT 混用需谨慎，
-///   因此 Network 层保留为兜底并输出两层计数供真机自诊断。
-/// - Network 层（兜底）：主机↔客户端的本地流量（如 DHCP ACK）只在此层出现；Forward 层
-///   未见过任何客户端包时（Forward 不可用的环境）由它承担计数与管控（旧行为）。
+/// 抓包架构（v0.4.0 定案，探针三轮真机取证）：
+/// - **Forward 层（主）**：WFP IPFORWARD 层。Win11 24H2 的移动热点 NAT（winnat 连接重定向型）下，
+///   客户端转发的每个包在 Forward 层出现两遍：第一遍 NAT 前（src/dst=192.168.137.x 原始地址），
+///   第二遍 NAT 后（src/dst=宿主出口 IP）。第一遍用于设备归属、计数与管控；TCP 按"五元组+seq"
+///   去重防止同一包被计两次。
+/// - **Network 层（兜底）**：主机↔客户端本地流量（如 DHCP ACK）只在此层出现；Forward 层未见过
+///   任何客户端包时（Forward 不可用的环境）由它承担计数与管控（旧行为），避免重复计数。
+/// - **过滤器纪律**：只允许 IPv4 比较子句。把 `ipv6.SrcAddr >= fe80:: …` 等 IPv6 比较子句与 IPv4
+///   子句并列在同一过滤器里，会使整个过滤器静默失配（探针对照实验实证：含 v6 子句 0 包，
+///   纯 v4 同点位 31.9 万包）。IPv6 管控是已知缺口：v6 包不进本引擎，正常流通。
 /// </summary>
 public sealed class TrafficEngine : IDisposable
 {
     /// <summary>Win10 移动热点默认私有网段（ICS 经典值 192.168.137.0/24；Win11 可能随机化，由 SetClients 动态补充）</summary>
     private const string DefaultSubnetBase = "192.168.137";
 
-    /// <summary>IPv6 链路本地 fe80::/10</summary>
-    private const string V6LinkLocal =
-        "(ipv6.SrcAddr >= fe80:: and ipv6.SrcAddr <= fe80::ffff:ffff:ffff:ffff) or " +
-        "(ipv6.DstAddr >= fe80:: and ipv6.DstAddr <= fe80::ffff:ffff:ffff:ffff)";
-
-    /// <summary>目标 TTL：手机包在转发路径上会减 1，设为 129 让网关收到 128（与 Windows 直发一致）</summary>
-    private const int UpstreamTtl = 129;
+    /// <summary>TTL 伪装目标：Forward 第一遍捕获点在"入向转发减 1 之后、出向转发减 1 之前"，
+    /// 设为 宿主TTL+1 则出口线上正是宿主 TTL（Win11 24H2 默认 TTL=64，老系统 128，注册表动态读取）</summary>
+    private readonly int _spoofTtl;
 
     private readonly ConcurrentDictionary<string, DeviceState> _devices = new();
 
@@ -39,6 +37,11 @@ public sealed class TrafficEngine : IDisposable
     private readonly HashSet<string> _subnetBases = new() { DefaultSubnetBase };
 
     private readonly object _lifecycleLock = new();
+
+    /// <summary>TCP 转发包去重：同一包在 Forward 层出现两遍，按五元组+seq 只计/管控一遍</summary>
+    private readonly HashSet<(uint SrcIp, uint DstIp, ushort SrcPort, ushort DstPort, uint Seq)> _tcpSeen = new();
+    private readonly object _tcpSeenLock = new();
+    private long _tcpSeenLastClear = DateTime.UtcNow.Ticks;
 
     private IntPtr _forwardHandle;
     private IntPtr _networkHandle;
@@ -48,9 +51,9 @@ public sealed class TrafficEngine : IDisposable
     private bool _forwardAvailable;
 
     // ---- 分层自诊断计数 ----
-    private long _forwardPackets;      // Forward 层见过的包（含非客户端）
-    private long _forwardClientPackets; // Forward 层匹配到设备的包
-    private long _networkPackets;      // Network 层见过的包
+    private long _forwardPackets;       // Forward 层见过的包（含非客户端与第二遍）
+    private long _forwardClientPackets; // Forward 层匹配到设备的"第一遍"包
+    private long _networkPackets;       // Network 层见过的包
     private volatile bool _forwardSeen; // Forward 层见过客户端包 → Network 层退出计数兜底
 
     /// <summary>是否对热点上行包做 TTL 伪装（抹掉多设备指纹）</summary>
@@ -62,6 +65,11 @@ public sealed class TrafficEngine : IDisposable
     public long TotalPacketsSeen =>
         Interlocked.Read(ref _forwardPackets) + Interlocked.Read(ref _networkPackets);
 
+    public TrafficEngine()
+    {
+        _spoofTtl = ReadHostTtl() + 1;
+    }
+
     public void Start()
     {
         lock (_lifecycleLock)
@@ -72,7 +80,7 @@ public sealed class TrafficEngine : IDisposable
             _networkHandle = OpenHandle(filter, WinDivertLayer.Network, out var networkErr);
 
             if (_forwardHandle == IntPtr.Zero && _networkHandle == IntPtr.Zero)
-                throw new InvalidOperationException(DescribeOpenError(forwardErr));
+                throw new InvalidOperationException(DescribeOpenError(forwardErr != 0 ? forwardErr : networkErr));
 
             _forwardAvailable = _forwardHandle != IntPtr.Zero;
             _running = true;
@@ -103,6 +111,7 @@ public sealed class TrafficEngine : IDisposable
             _networkThread = null;
             _forwardSeen = false;
             _forwardAvailable = false;
+            lock (_tcpSeenLock) _tcpSeen.Clear();
         }
     }
 
@@ -217,12 +226,14 @@ public sealed class TrafficEngine : IDisposable
             throw new InvalidOperationException(DescribeOpenError(forwardErr));
     }
 
+    /// <summary>构造过滤器。纪律：只允许 IPv4 比较子句——IPv6 比较子句混入会使整个过滤器
+    /// 静默失配（探针对照实验实证，见类注释）。</summary>
     private static string BuildFilter(IEnumerable<string> bases)
     {
         var v4 = string.Join(" or ", bases.Select(b =>
             $"(ip.SrcAddr >= {b}.0 and ip.SrcAddr <= {b}.255) or " +
             $"(ip.DstAddr >= {b}.0 and ip.DstAddr <= {b}.255)"));
-        return $"({v4}) or {V6LinkLocal}";
+        return $"({v4})";
     }
 
     private static bool TryGetSubnetBase(string ip, out string baseText)
@@ -234,6 +245,21 @@ public sealed class TrafficEngine : IDisposable
         if (octets.Length != 4) return false;
         baseText = $"{octets[0]}.{octets[1]}.{octets[2]}";
         return true;
+    }
+
+    /// <summary>读宿主默认 TTL（注册表 Tcpip\Parameters\DefaultTtl；Win11 24H2 为 64，老系统 128）</summary>
+    private static int ReadHostTtl()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters");
+            if (key?.GetValue("DefaultTtl") is int ttl && ttl is > 0 and <= 255) return ttl;
+        }
+        catch
+        {
+            // 读不到就用 Win11 24H2 实测默认值
+        }
+        return 64;
     }
 
     // ---- 抓包线程 ----
@@ -272,12 +298,13 @@ public sealed class TrafficEngine : IDisposable
         }
     }
 
-    /// <summary>Forward 层（转发路径，NAT 前地址）：设备流量计数 + TTL 伪装 + 限速/拉黑。</summary>
+    /// <summary>Forward 层（转发路径）：设备流量计数 + TTL 伪装 + 限速/拉黑。
+    /// 每个转发包经过本层两遍（NAT 前后），TCP 按"五元组+seq"去重只处理第一遍。</summary>
     private void ProcessForwardPacket(WinDivertBuffer buffer, uint len, ref WinDivertAddress addr)
     {
         if (len < 20 || (buffer[0] >> 4) != 4)
         {
-            Reinject(_forwardHandle, buffer, len, ref addr); // IPv6 等：直接放行（v6 计数为已知缺口）
+            Reinject(_forwardHandle, buffer, len, ref addr); // IPv6 等：直接放行（v6 管控为已知缺口）
             return;
         }
 
@@ -291,24 +318,59 @@ public sealed class TrafficEngine : IDisposable
             return;
         }
 
+        // 第二遍去重：TCP 同包 NAT 前后两遍五元组+seq 相同；UDP 靠 IP ID 可能去不净，允许少量重复计数
+        if (IsDuplicateSecondPass(buffer, len))
+        {
+            Reinject(_forwardHandle, buffer, len, ref addr);
+            return;
+        }
+
         _forwardSeen = true;
         Interlocked.Increment(ref _forwardClientPackets);
         if (srcIsDevice) Interlocked.Add(ref upState!.TotalUp, len);
         if (dstIsDevice) Interlocked.Add(ref downState!.TotalDown, len);
 
         var owner = srcIsDevice ? upState : downState; // 上行按源设备、下行按目的设备管控
-        if (owner!.Blocked) return;                    // 拉黑：双向丢弃
+        if (owner!.Blocked) return;                    // 拉黑：双向丢弃（第一遍丢弃即死，第二遍不存在）
         if (owner.LimitBytesPerSec > 0 && !TryConsumeToken(owner, len))
             return;                                    // 限速：超额丢弃
 
-        // TTL 伪装：仅客户端→外网的上行包（client↔client 互访不动）
-        if (TtlSpoofEnabled && srcIsDevice && !dstIsDevice && buffer[8] != UpstreamTtl)
+        // TTL 伪装：仅客户端→外网的上行包（client↔client 互访不动）。
+        // 捕获点在"入向转发减 1 后、出向转发减 1 前"，故设 宿主TTL+1，出口线上即宿主 TTL。
+        if (TtlSpoofEnabled && srcIsDevice && !dstIsDevice && buffer[8] != _spoofTtl)
         {
-            buffer[8] = UpstreamTtl;
+            buffer[8] = (byte)_spoofTtl;
             FixIpChecksum(buffer, len);
         }
 
         Reinject(_forwardHandle, buffer, len, ref addr);
+    }
+
+    /// <summary>识别 Forward 层的第二遍（同一包 NAT 后的副本）。TCP 依据五元组+seq；
+    /// 每 5 秒整体清空一次旧键防集合膨胀（重传窗口内的旧包可能被重计，量级可忽略）。</summary>
+    private bool IsDuplicateSecondPass(WinDivertBuffer buffer, uint len)
+    {
+        if (buffer[9] != 6) return false; // 只对 TCP 去重
+        var ihl = (buffer[0] & 0x0F) * 4;
+        if (len < ihl + 20) return false;
+
+        uint srcIp = (uint)((buffer[12] << 24) | (buffer[13] << 16) | (buffer[14] << 8) | buffer[15]);
+        uint dstIp = (uint)((buffer[16] << 24) | (buffer[17] << 16) | (buffer[18] << 8) | buffer[19]);
+        ushort srcPort = (ushort)((buffer[ihl] << 8) | buffer[ihl + 1]);
+        ushort dstPort = (ushort)((buffer[ihl + 2] << 8) | buffer[ihl + 3]);
+        uint seq = (uint)((buffer[ihl + 4] << 24) | (buffer[ihl + 5] << 16) | (buffer[ihl + 6] << 8) | buffer[ihl + 7]);
+        var key = (SrcIp: srcIp, DstIp: dstIp, SrcPort: srcPort, DstPort: dstPort, Seq: seq);
+
+        var now = DateTime.UtcNow.Ticks;
+        lock (_tcpSeenLock)
+        {
+            if (now - _tcpSeenLastClear > TimeSpan.FromSeconds(5).Ticks)
+            {
+                _tcpSeen.Clear();
+                _tcpSeenLastClear = now;
+            }
+            return !_tcpSeen.Add(key);
+        }
     }
 
     /// <summary>Network 层（主机本地路径）兜底：主机↔客户端本地流量始终计数；
@@ -341,9 +403,9 @@ public sealed class TrafficEngine : IDisposable
         if (state.LimitBytesPerSec > 0 && !TryConsumeToken(state, len))
             return;
 
-        if (TtlSpoofEnabled && srcIsDevice && !dstIsDevice && buffer[8] != UpstreamTtl)
+        if (TtlSpoofEnabled && srcIsDevice && !dstIsDevice && buffer[8] != _spoofTtl)
         {
-            buffer[8] = UpstreamTtl;
+            buffer[8] = (byte)_spoofTtl;
             FixIpChecksum(buffer, len);
         }
 

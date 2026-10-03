@@ -3,6 +3,23 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本单源在 `Directory.Build.props`。
 
+## [0.4.0] - 2026-10-03
+
+### 修复
+
+- **按设备管控全面复活（探针三轮对照实验定案）**：引擎 0 包的真正根因是过滤器里的 IPv6 fe80
+  比较子句使整个过滤器静默失配——同点位纯 IPv4 过滤器实测 31.9 万包。BuildFilter 改为纯 IPv4
+  子句，Forward 层按设备统计/限速/拉黑/TTL 伪装全部生效。
+- **转发包双遍捕获去重**：Win11 新热点下同一转发包在 Forward 层出现两遍（NAT 前后各一），
+  TCP 按"五元组+seq"去重，避免下行流量双计。
+- **TTL 伪装目标值动态化**：Win11 24H2 默认 TTL 已从 128 改为 64（注册表读取），
+  伪装值 = 宿主 TTL+1（Forward 捕获点在两次转发递减之间）。
+
+### 变更
+
+- 诊断探针 v4：Forward 层三句柄对照（引擎原版/纯IPv4/true）、FLOW 层 P/Invoke 修正
+  （补 packetLen 参数，此前 Win32 998 报错）。
+
 ## [Unreleased]
 
 ### 已知问题

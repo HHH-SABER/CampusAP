@@ -2,7 +2,7 @@
   <!-- 版本单源：程序集版本、安装包版本、发布产物命名都从这里取。
        改版本只改这一处；发布.ps1 会把它传给 Inno Setup（/DMyAppVersion）。 -->
   <PropertyGroup>
-    <Version>0.3.1</Version>
+    <Version>0.4.0</Version>
     <LangVersion>latest</LangVersion>
     <Authors>CampusAP contributors</Authors>
     <Product>CampusAP</Product>

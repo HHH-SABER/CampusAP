@@ -71,7 +71,7 @@ var flowThread = new Thread(() =>
     while (DateTime.UtcNow < deadline)
     {
         uint len = 0;
-        if (!WinDivertNative.WDRecv(h, buf, ref len, addr))
+        if (!WinDivertNative.WDRecv(h, buf, (uint)buf.Length, ref len, addr))
         {
             flowStat.RecvError = Marshal.GetLastWin32Error();
             break;
@@ -141,8 +141,9 @@ internal static class WinDivertNative
     [DllImport("WinDivert.dll", SetLastError = true, EntryPoint = "WinDivertOpen")]
     public static extern IntPtr WDOpen([MarshalAs(UnmanagedType.LPStr)] string filter, int layer, short priority, ulong flags);
 
+    // 原生签名：WinDivertRecv(HANDLE, VOID* pPacket, UINT packetLen, UINT* pRecvLen, WINDIVERT_ADDRESS* pAddr)
     [DllImport("WinDivert.dll", SetLastError = true, EntryPoint = "WinDivertRecv")]
-    public static extern bool WDRecv(IntPtr handle, byte[] buffer, ref uint length, [Out] byte[] addr);
+    public static extern bool WDRecv(IntPtr handle, byte[] buffer, uint packetLen, ref uint length, [Out] byte[] addr);
 
     [DllImport("WinDivert.dll", SetLastError = true, EntryPoint = "WinDivertClose")]
     public static extern bool WDClose(IntPtr handle);
