@@ -17,10 +17,16 @@ public sealed class TrafficEngine : IDisposable
         "(ip.SrcAddr >= 192.168.137.0 and ip.SrcAddr <= 192.168.137.255) or " +
         "(ip.DstAddr >= 192.168.137.0 and ip.DstAddr <= 192.168.137.255)";
 
+    /// <summary>目标 TTL：手机包经 NAT 后减1，设为 129 让网关收到 127（与 Windows 直发一致）</summary>
+    private const int UpstreamTtl = 129;
+
     private IntPtr _handle = IntPtr.Zero;
     private Thread? _worker;
     private volatile bool _running;
     private readonly ConcurrentDictionary<string, DeviceState> _devices = new();
+
+    /// <summary>是否对热点上行包做 TTL 伪装（抹掉多设备指纹）</summary>
+    public bool TtlSpoofEnabled { get; set; } = true;
 
     public bool IsRunning => _running;
 
@@ -136,12 +142,43 @@ public sealed class TrafficEngine : IDisposable
             if (state.LimitBytesPerSec > 0 && !TryConsumeToken(state, len))
                 continue;                                    // 限速：超额丢弃
 
+            // TTL 伪装：客户端上行包（src=热点IP）改成 129，NAT 后与 Windows 直发一致
+            if (TtlSpoofEnabled && _devices.ContainsKey(src) && buffer[8] != UpstreamTtl)
+            {
+                buffer[8] = UpstreamTtl;
+                FixIpChecksum(buffer, len);
+            }
+
             Reinject(buffer, len, ref addr);
         }
     }
 
     private void Reinject(WinDivertBuffer buffer, uint len, ref WinDivertAddress addr)
         => WinDivert.WinDivertSend(_handle, buffer, len, ref addr);
+
+    /// <summary>重算 IPv4 头校验和（改了 TTL 后必须调用，否则包被丢弃）</summary>
+    private static void FixIpChecksum(WinDivertBuffer buffer, uint len)
+    {
+        int ihl = (buffer[0] & 0x0F) * 4;   // IP 头长度
+        if (len < ihl || ihl < 20) return;
+
+        // 清零校验和字段（offset 12-13）
+        buffer[12] = 0;
+        buffer[13] = 0;
+
+        uint sum = 0;
+        for (int i = 0; i < ihl; i += 2)
+        {
+            ushort word = (ushort)((buffer[i] << 8) | buffer[i + 1]);
+            sum += word;
+        }
+        while ((sum >> 16) != 0)
+            sum = (sum & 0xFFFF) + (sum >> 16);
+
+        ushort checksum = (ushort)(~sum);
+        buffer[12] = (byte)(checksum >> 8);
+        buffer[13] = (byte)(checksum & 0xFF);
+    }
 
     private static bool TryConsumeToken(DeviceState s, uint cost)
     {

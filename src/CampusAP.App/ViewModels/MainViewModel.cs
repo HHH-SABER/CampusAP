@@ -8,6 +8,7 @@ using CampusAP.App.Services;
 using CampusAP.Core.CampusAuth;
 using CampusAP.Core.Devices;
 using CampusAP.Core.Hotspot;
+using CampusAP.Core.Web;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -17,6 +18,7 @@ public partial class MainViewModel : ObservableObject
 {
     private readonly TetheringBackend _backend = new();
     private readonly TrafficEngine _engine = new();
+    private readonly WebConsoleServer _webConsole;
     private readonly Dictionary<string, (long Up, long Down)> _lastTotals = new();
     private DateTime _lastRateSample = DateTime.UtcNow;
 
@@ -46,9 +48,15 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private bool isAdmin = new WindowsPrincipal(WindowsIdentity.GetCurrent())
         .IsInRole(WindowsBuiltInRole.Administrator);
 
+    /// <summary>TTL 伪装开关（从设置读取，改动即时生效并保存）</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TtlSpoofText))]
+    private bool ttlSpoof;
+
     public event Action? FloatToggleRequested;
 
     public string FloatToggleText => FloatWindowOpen ? "关闭悬浮窗" : "打开悬浮窗";
+    public string TtlSpoofText => TtlSpoof ? "TTL伪装：开" : "TTL伪装：关";
 
     public string ToggleText => State switch
     {
@@ -62,10 +70,31 @@ public partial class MainViewModel : ObservableObject
 
     public MainViewModel()
     {
+        TtlSpoof = Settings.TtlSpoofEnabled;
+        _engine.TtlSpoofEnabled = TtlSpoof;
+
+        _webConsole = new WebConsoleServer(_engine)
+        {
+            DeviceProvider = GetWebDevices,
+            LimitCommand = (ip, bps) => OnLimitRequested(Devices.FirstOrDefault(d => d.Ip == ip)!, BytesToLimitIndex(bps)),
+            BlockCommand = (ip, blocked) =>
+            {
+                var vm = Devices.FirstOrDefault(d => d.Ip == ip);
+                if (vm is not null && vm.Blocked != blocked) OnBlockRequested(vm);
+            },
+        };
+
         _backend.StatusChanged += s =>
         {
             System.Windows.Application.Current?.Dispatcher.Invoke(() => ApplyStatus(s));
         };
+    }
+
+    partial void OnTtlSpoofChanged(bool value)
+    {
+        _engine.TtlSpoofEnabled = value;
+        Settings.TtlSpoofEnabled = value;
+        Settings.Save();
     }
 
     [RelayCommand]
@@ -184,6 +213,7 @@ public partial class MainViewModel : ObservableObject
     private readonly EportalClient _eportal = new();
     private bool _campusBusy;
     private string? _lastRedirectUrl;
+    private PortalKind _lastPortalKind = PortalKind.RuijieEportal;
 
     [ObservableProperty] private CampusAuthState authState = CampusAuthState.Unknown;
     [ObservableProperty] private string authStatusText = "校园网认证状态未知";
@@ -258,7 +288,7 @@ public partial class MainViewModel : ObservableObject
 
             AuthStatusText = "正在登录校园网…";
             var login = await _eportal.LoginAsync(parsed.Value.PortalDir, parsed.Value.QueryString,
-                CampusUserId.Trim(), CampusPassword, CampusService.Trim());
+                CampusUserId.Trim(), CampusPassword, CampusService.Trim(), _lastPortalKind);
             if (!login.Success)
             {
                 AuthStatusText = "登录失败：" + login.Message;
@@ -303,6 +333,7 @@ public partial class MainViewModel : ObservableObject
         AuthState = status.State;
         AuthStatusText = status.Detail;
         _lastRedirectUrl = status.RedirectUrl;
+        _lastPortalKind = status.Kind;
     }
 
     /// <summary>看门狗：每 60 秒探测一次；掉线且已保存账号时自动重登</summary>
@@ -330,7 +361,7 @@ public partial class MainViewModel : ObservableObject
                 if (parsed is null) return;
 
                 var login = await _eportal.LoginAsync(parsed.Value.PortalDir, parsed.Value.QueryString,
-                    account.UserId, password, account.Service);
+                    account.UserId, password, account.Service, status.Kind);
                 if (login.Success)
                 {
                     ApplyCampusStatus(await _eportal.CheckAsync());
@@ -398,6 +429,7 @@ public partial class MainViewModel : ObservableObject
     {
         if (EngineRunning)
         {
+            _webConsole.Stop();
             _engine.Stop();
             EngineRunning = false;
             EngineStatusText = "流量管控未启用（限速/拉黑需要开启）";
@@ -428,8 +460,12 @@ public partial class MainViewModel : ObservableObject
         try
         {
             _engine.Start();
+            try { _webConsole.Start(); }
+            catch (Exception ex) { EngineStatusText = "管控已开，但Web管理页启动失败：" + ex.Message; }
             EngineRunning = true;
-            EngineStatusText = "流量管控运行中";
+            EngineStatusText = _webConsole.IsRunning
+                ? $"流量管控运行中 · 手机访问 http://{WebConsoleServer.GatewayIp}:{WebConsoleServer.Port} 管理设备"
+                : "流量管控运行中";
         }
         catch (Exception ex)
         {
@@ -452,6 +488,26 @@ public partial class MainViewModel : ObservableObject
             _ => 0,
         };
         _engine.SetLimit(vm.Ip, bytesPerSec);
+    }
+
+    /// <summary>Web 端限速值转下拉索引</summary>
+    private static int BytesToLimitIndex(long bps) => bps switch
+    {
+        2_500_000 => 1,
+        625_000 => 2,
+        125_000 => 3,
+        32_000 => 4,
+        _ => 0,
+    };
+
+    /// <summary>Web 管理页：快照当前设备列表</summary>
+    private IReadOnlyList<WebConsoleServer.DeviceInfo> GetWebDevices()
+    {
+        return Devices.Select(d => new WebConsoleServer.DeviceInfo(
+            d.Ip, d.Mac, d.DisplayName, d.Vendor,
+            d.UpRate, d.DownRate, d.Blocked,
+            d.LimitIndex switch { 1 => 2_500_000, 2 => 625_000, 3 => 125_000, 4 => 32_000, _ => 0 }
+        )).ToList();
     }
 
     private void OnBlockRequested(DeviceViewModel vm)

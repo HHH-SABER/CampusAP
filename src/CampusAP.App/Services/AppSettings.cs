@@ -18,8 +18,11 @@ public sealed class AppSettings
 {
     public CloseAction CloseAction { get; set; } = CloseAction.Ask;
 
-    /// <summary>设备自定义名：键为去冒号大写的 MAC（无 MAC 时 "ip:地址"），值可为空串（=清除自定义名）</summary>
+    /// <summary>设备自定义名：键为去冒号大写的 MAC</summary>
     public Dictionary<string, string> DeviceNames { get; set; } = new();
+
+    /// <summary>TTL 伪装：把手机上行包 TTL 统一为与 Windows 直发一致（默认开）</summary>
+    public bool TtlSpoofEnabled { get; set; } = true;
 
     private static string DirPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CampusAP");

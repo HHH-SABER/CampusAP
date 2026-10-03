@@ -1,6 +1,7 @@
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using CampusAP.Core.Devices;
 
 namespace CampusAP.App.ViewModels;
 
@@ -8,7 +9,15 @@ namespace CampusAP.App.ViewModels;
 public partial class DeviceViewModel : ObservableObject
 {
     [ObservableProperty] private string ip = "";
-    [ObservableProperty] private string mac = "";
+
+    /// <summary>设置 MAC 时自动查厂商</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplayName))]
+    [NotifyPropertyChangedFor(nameof(IpLineVisibility))]
+    private string mac = "";
+
+    /// <summary>OUI 厂商名（如"小米""华为""Apple"），查不到为空</summary>
+    public string? Vendor => OuiLookup.GetVendor(Mac);
 
     /// <summary>用户自定义名（按 MAC 记住，留空=不使用）</summary>
     [ObservableProperty]
@@ -26,10 +35,11 @@ public partial class DeviceViewModel : ObservableObject
     [ObservableProperty] private string upRate = "—";
     [ObservableProperty] private string totalText = "—";
 
-    /// <summary>列表首行显示名：自定义名 > 主机名 > IP</summary>
+    /// <summary>列表首行显示名：自定义名 > 主机名 > 厂商名 > IP</summary>
     public string DisplayName =>
         !string.IsNullOrWhiteSpace(CustomName) ? CustomName
         : !string.IsNullOrWhiteSpace(HostName) ? HostName
+        : !string.IsNullOrWhiteSpace(Vendor) ? Vendor
         : Ip;
 
     /// <summary>显示名已不是 IP 时，在下方补一行小字 IP（否则与首行重复）</summary>

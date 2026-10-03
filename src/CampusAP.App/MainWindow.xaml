@@ -326,10 +326,14 @@
                         <TextBlock Text="双击设备名可自定义命名" FontSize="10.5" Foreground="#94A3B8"
                                    VerticalAlignment="Bottom" Margin="10,0,0,3"/>
                     </StackPanel>
-                    <Button Grid.Column="1" Content="{Binding FloatToggleText}"
-                            Command="{Binding ToggleFloatWindowCommand}" Cursor="Hand"
-                            Padding="10,4" BorderThickness="0" Foreground="White" FontWeight="SemiBold"
-                            VerticalAlignment="Center">
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <CheckBox Content="{Binding TtlSpoofText}" IsChecked="{Binding TtlSpoof}"
+                                  VerticalAlignment="Center" Margin="0,0,12,0" FontSize="12"
+                                  Foreground="#64748B" ToolTip="把手机上行包TTL统一为与Windows一致，避免被网关识别多设备"/>
+                        <Button Content="{Binding FloatToggleText}"
+                                Command="{Binding ToggleFloatWindowCommand}" Cursor="Hand"
+                                Padding="10,4" BorderThickness="0" Foreground="White" FontWeight="SemiBold"
+                                VerticalAlignment="Center">
                         <Button.Style>
                             <Style TargetType="Button">
                                 <Setter Property="Background" Value="#0EA5E9"/>
@@ -340,7 +344,8 @@
                                 </Style.Triggers>
                             </Style>
                         </Button.Style>
-                    </Button>
+                        </Button>
+                    </StackPanel>
                 </Grid>
                 <controls:DevicePanel Grid.Row="1"/>
             </Grid>
