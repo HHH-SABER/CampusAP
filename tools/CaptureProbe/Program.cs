@@ -1,12 +1,10 @@
 ﻿using System.Runtime.InteropServices;
 using WinDivertSharp;
 
-// WinDivert 抓包层诊断探针：
-// Network 层（to/from local machine）+ Forward 层（passing through）+ FLOW 层（连接事件），
-// 各抓 12 秒。用于判断本机热点 NAT 的转发路径：
-//   · Forward/Network 是否可见转发流量；
-//   · FLOW 事件的本地地址是 NAT 前（192.168.137.x，可按设备映射）还是 NAT 后。
-// 用法：交互模式直接运行；代理运行用 --auto <日志文件>（免交互、输出落文件）。
+// WinDivert 抓包层诊断探针 v3：
+// Forward 层开三个对照句柄——引擎原版过滤器(含 IPv6 子句) / 纯 IPv4 版 / true，
+// 一次运行分辨"引擎过滤器为何 0 包"。另保留 Network 层全量与 FLOW 层（带错误码）。
+// 用法：交互模式直接运行；代理运行用 --auto <日志文件>。
 
 const int DurationSeconds = 12;
 
@@ -21,55 +19,63 @@ void P(string s)
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 if (logPath is not null && File.Exists(logPath)) File.Delete(logPath);
-P("=== WinDivert 抓包层诊断探针 ===");
-P($"将全量抓取 {DurationSeconds} 秒，期间网络经本程序中转，属正常现象。");
+P("=== WinDivert 抓包层诊断探针 v3 ===");
+P($"抓取 {DurationSeconds} 秒。请确保手机连热点并高速跑流量，宿主机尽量静默。");
 if (logPath is null)
 {
-    Console.WriteLine("请确保：手机已连热点，且正在跑流量（测速/视频）。按回车开始…");
+    Console.WriteLine("按回车开始…");
     Console.ReadLine();
 }
-else
-{
-    P($"免交互模式，结果将写入 {logPath}");
-}
 
-var layers = new Dictionary<WinDivertLayer, LayerStat>
+// 引擎 BuildFilter 的原版输出（v0.2.2/v0.3.x TrafficEngine 实际使用的字符串）
+const string SubnetFull = "((ip.SrcAddr >= 192.168.137.0 and ip.SrcAddr <= 192.168.137.255) or " +
+    "(ip.DstAddr >= 192.168.137.0 and ip.DstAddr <= 192.168.137.255)) or " +
+    "(ipv6.SrcAddr >= fe80:: and ipv6.SrcAddr <= fe80::ffff:ffff:ffff:ffff) or " +
+    "(ipv6.DstAddr >= fe80:: and ipv6.DstAddr <= fe80::ffff:ffff:ffff:ffff)";
+// 纯 IPv4 版（去掉 IPv6 子句）
+const string SubnetV4Only = "(ip.SrcAddr >= 192.168.137.0 and ip.SrcAddr <= 192.168.137.255) or " +
+    "(ip.DstAddr >= 192.168.137.0 and ip.DstAddr <= 192.168.137.255)";
+
+// 优先级：数字越小越先匹配。subnetFull(-200) → subnetV4Only(-100) → true(0)。
+// 若 Full 工作则 Full>0 且 V4Only=0（被 Full 截流）；若 Full 失效则 V4Only>0；都失效则只剩 true。
+var openings = new[]
 {
-    [WinDivertLayer.Network] = new(),
-    [WinDivertLayer.Forward] = new(),
+    (name: "Forward/引擎原版(含v6子句)", filter: SubnetFull, priority: (short)(-200), stat: new LayerStat()),
+    (name: "Forward/纯IPv4版", filter: SubnetV4Only, priority: (short)(-100), stat: new LayerStat()),
+    (name: "Forward/true全量", filter: "true", priority: (short)0, stat: new LayerStat()),
+    (name: "Network/true全量", filter: "true", priority: (short)0, stat: new LayerStat()),
 };
 
-foreach (var layer in layers.Keys.ToList())
+foreach (var (name, filter, priority, stat) in openings)
 {
-    var handle = WinDivert.WinDivertOpen("true", layer, 0, WinDivertOpenFlags.None);
+    var handle = WinDivert.WinDivertOpen(filter, name.StartsWith("Network") ? WinDivertLayer.Network : WinDivertLayer.Forward, priority, WinDivertOpenFlags.None);
     if (handle == IntPtr.Zero)
     {
         var err = Marshal.GetLastWin32Error();
-        P($"[{layer}] 打开失败：Win32 错误码 {err}（5=需要管理员，2=缺 WinDivert 文件）");
-        layers.Remove(layer);
+        P($"[{name}] 打开失败：Win32 {err}");
         continue;
     }
-    var stat = layers[layer];
-    var thread = new Thread(() => Capture(handle, stat, DurationSeconds)) { Name = $"probe-{layer}" };
-    stat.Thread = thread;
-    thread.Start();
+    var t = new Thread(() => Capture(handle, stat, DurationSeconds)) { Name = $"probe-{name}" };
+    stat.Thread = t;
+    t.Start();
 }
 
-// FLOW 层：连接建立事件。winnat 连接重定向型 NAT 下 Forward 层 0 包，
-// 但 ALE 流事件可能携带 NAT 前的本地地址——若命中 192.168.137.x 即拿到 设备<->NAT端口 映射。
-// WinDivertSharp 的地址结构不含 FLOW 数据区，这里自写 P/Invoke 读完整 WINDIVERT_ADDRESS。
 var flowStat = new FlowStat();
 var flowThread = new Thread(() =>
 {
     var h = WinDivertNative.WDOpen("true", 1 /* FLOW */, 0, 0);
     if (h == IntPtr.Zero) { flowStat.OpenError = Marshal.GetLastWin32Error(); return; }
     var buf = new byte[0x10000];
-    var addr = new byte[128]; // 原生驱动按完整结构写入，缓冲区必须足够
+    var addr = new byte[128];
     var deadline = DateTime.UtcNow.AddSeconds(DurationSeconds);
     while (DateTime.UtcNow < deadline)
     {
         uint len = 0;
-        if (!WinDivertNative.WDRecv(h, buf, ref len, addr)) break;
+        if (!WinDivertNative.WDRecv(h, buf, ref len, addr))
+        {
+            flowStat.RecvError = Marshal.GetLastWin32Error();
+            break;
+        }
         flowStat.Count(addr);
     }
     WinDivertNative.WDClose(h);
@@ -77,48 +83,41 @@ var flowThread = new Thread(() =>
 flowThread.Start();
 
 P($"抓包中… {DurationSeconds} 秒");
-foreach (var stat in layers.Values) stat.Thread?.Join();
+foreach (var s in openings) s.stat.Thread?.Join();
 flowThread.Join();
 
 P("");
 P("===== FLOW 层（连接事件）=====");
-if (flowStat.OpenError != 0)
-    P($"打开失败：Win32 {flowStat.OpenError}（5=需要管理员）");
+if (flowStat.OpenError != 0) P($"打开失败：Win32 {flowStat.OpenError}");
+else if (flowStat.RecvError != 0) P($"Recv 失败退出：Win32 {flowStat.RecvError}（0 事件不可信）");
 else
 {
-    P($"事件总数 {flowStat.Total}（含本机自身连接，样本限量 40 条）");
-    P("样本（方向 协议 local:port → remote:port PID）——重点看有没有 192.168.137.x：");
-    foreach (var line in flowStat.Samples.Take(40)) P("  " + line);
+    P($"事件总数 {flowStat.Total}");
+    foreach (var line in flowStat.Samples.Take(30)) P("  " + line);
 }
 P("");
 
-foreach (var kv in layers)
+foreach (var (name, filter, priority, stat) in openings)
 {
-    var s = kv.Value;
-    P($"===== {kv.Key} 层 =====");
-    P($"总包数 {s.Total}（IPv4 {s.V4}，IPv6/其他 {s.Total - s.V4}）");
-    P($"方向：outbound={s.Outbound}  inbound={s.Inbound}");
-    P("TTL 分布（IPv4 样本）：" +
-        (s.TtlHist.Count == 0 ? "无" : string.Join("  ", s.TtlHist.OrderBy(x => x.Key).Select(x => $"TTL{x.Key}×{x.Value}"))));
-    P("样本（src:port → dst:port 协议 TTL）：");
-    foreach (var line in s.Samples.Take(40)) P("  " + line);
+    P($"===== {name}（priority={priority}）=====");
+    P($"总包数 {stat.Total}（IPv4 {stat.V4}）");
+    if (name.Contains("true全量"))
+    {
+        P("TTL 分布：" + (stat.TtlHist.Count == 0 ? "无" : string.Join("  ", stat.TtlHist.OrderBy(x => x.Key).Select(x => $"TTL{x.Key}×{x.Value}"))));
+        P("样本：");
+        foreach (var line in stat.Samples.Take(30)) P("  " + line);
+    }
     P("");
 }
 
-P("解读提示：");
-P("· Forward 层有 192.168.137.x 源地址的包 → 可在 Forward 层按设备统计与管控（v0.2.2 设计预期）；");
-P("· Forward/Network 都 0 包但 FLOW 事件带 137.x 本地地址 → 用 FLOW 事件做 设备<->NAT端口 映射 + Network 层管控；");
-P("· FLOW 事件也全是出口 IP → winnat 完全封闭，转 Npcap/ETW NDIS 旁路统计方案。");
+P("判定：引擎原版>0 → 引擎过滤器没问题（另找原因）；纯IPv4>0且原版=0 → IPv6 子句毒化过滤器，引擎需拆分；都=0 → 比较运算符失效，引擎改写过滤器。");
 
 if (logPath is null)
 {
     Console.WriteLine("\n按回车退出…");
     Console.ReadLine();
 }
-else
-{
-    P($"=== 探针完成，结果已写入 {logPath} ===");
-}
+else P($"=== 完成，结果已写入 {logPath} ===");
 Environment.Exit(0);
 
 static void Capture(IntPtr handle, LayerStat stat, int seconds)
@@ -137,47 +136,6 @@ static void Capture(IntPtr handle, LayerStat stat, int seconds)
     WinDivert.WinDivertClose(handle);
 }
 
-// ---- FLOW 层：完整 WINDIVERT_ADDRESS 的手动解析 ----
-// 结构：Timestamp(8) + 位域(4) + union{ Endpoint(8) ParentEndpoint(8) ProcessId(4) LocalAddr(16) RemoteAddr(16) LocalPort(4) RemotePort(4) Protocol(1)… }
-internal sealed class FlowStat
-{
-    public int OpenError;
-    public long Total;
-    public readonly List<string> Samples = new();
-    private readonly object _lock = new();
-
-    public void Count(byte[] a)
-    {
-        lock (_lock)
-        {
-            Total++;
-            if (Samples.Count >= 40) return; // 限样本量，防本机连接刷屏
-            uint bits = BitConverter.ToUInt32(a, 8);
-            if ((int)(bits & 0xFF) != 1) return; // 只认 FLOW 层
-            bool outbound = (bits & 0x100) != 0;
-            const int ep = 12; // union 起点
-            int localOff = ep + 20; // Endpoint(8)+ParentEndpoint(8)+ProcessId(4)
-            var local = Addr16(a, localOff);
-            var remote = Addr16(a, localOff + 16);
-            uint lport = BitConverter.ToUInt32(a, localOff + 32) & 0xFFFF;
-            uint rport = BitConverter.ToUInt32(a, localOff + 36) & 0xFFFF;
-            var proto = a[localOff + 40] switch { 6 => "TCP", 17 => "UDP", 1 => "ICMP", _ => $"p{a[localOff + 40]}" };
-            Samples.Add($"{(outbound ? "出" : "入")} {proto} {local}:{lport} → {remote}:{rport} PID={BitConverter.ToUInt32(a, ep + 16)}");
-        }
-    }
-
-    private static string Addr16(byte[] a, int off)
-    {
-        // IPv4 以 ::ffff:x.y.z.w 映射形式出现，读末 4 字节即可
-        if (a[off + 10] == 0xff && a[off + 11] == 0xff)
-            return $"{a[off + 12]}.{a[off + 13]}.{a[off + 14]}.{a[off + 15]}";
-        var sb = new System.Text.StringBuilder();
-        for (var i = 0; i < 16; i += 2)
-            sb.Append(((a[off + i] << 8) | a[off + i + 1]).ToString("x")).Append(':');
-        return sb.ToString(0, sb.Length - 1);
-    }
-}
-
 internal static class WinDivertNative
 {
     [DllImport("WinDivert.dll", SetLastError = true, EntryPoint = "WinDivertOpen")]
@@ -190,13 +148,50 @@ internal static class WinDivertNative
     public static extern bool WDClose(IntPtr handle);
 }
 
+internal sealed class FlowStat
+{
+    public int OpenError;
+    public int RecvError;
+    public long Total;
+    public readonly List<string> Samples = new();
+    private readonly object _lock = new();
+
+    public void Count(byte[] a)
+    {
+        lock (_lock)
+        {
+            Total++;
+            if (Samples.Count >= 30) return;
+            uint bits = BitConverter.ToUInt32(a, 8);
+            if ((int)(bits & 0xFF) != 1) return;
+            bool outbound = (bits & 0x100) != 0;
+            const int ep = 12;
+            int localOff = ep + 20;
+            var local = Addr16(a, localOff);
+            var remote = Addr16(a, localOff + 16);
+            uint lport = BitConverter.ToUInt32(a, localOff + 32) & 0xFFFF;
+            uint rport = BitConverter.ToUInt32(a, localOff + 36) & 0xFFFF;
+            var proto = a[localOff + 40] switch { 6 => "TCP", 17 => "UDP", 1 => "ICMP", _ => $"p{a[localOff + 40]}" };
+            Samples.Add($"{(outbound ? "出" : "入")} {proto} {local}:{lport} → {remote}:{rport} PID={BitConverter.ToUInt32(a, ep + 16)}");
+        }
+    }
+
+    private static string Addr16(byte[] a, int off)
+    {
+        if (a[off + 10] == 0xff && a[off + 11] == 0xff)
+            return $"{a[off + 12]}.{a[off + 13]}.{a[off + 14]}.{a[off + 15]}";
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < 16; i += 2)
+            sb.Append(((a[off + i] << 8) | a[off + i + 1]).ToString("x")).Append(':');
+        return sb.ToString(0, sb.Length - 1);
+    }
+}
+
 sealed class LayerStat
 {
     public Thread? Thread;
     public long Total;
     public long V4;
-    public long Outbound;
-    public long Inbound;
     public readonly Dictionary<int, int> TtlHist = new();
     public readonly List<string> Samples = new();
     private readonly object _lock = new();
@@ -206,16 +201,15 @@ sealed class LayerStat
         lock (_lock)
         {
             Total++;
-            if (addr.Direction == WinDivertDirection.Outbound) Outbound++; else Inbound++;
             if (len < 20 || (buffer[0] >> 4) != 4) return;
             V4++;
             var src = $"{buffer[12]}.{buffer[13]}.{buffer[14]}.{buffer[15]}";
             var dst = $"{buffer[16]}.{buffer[17]}.{buffer[18]}.{buffer[19]}";
-            var proto = buffer[9] switch { 6 => "TCP", 17 => "UDP", 1 => "ICMP", _ => $"ip{buffer[9]}" };
             var ttl = buffer[8];
             TtlHist[ttl] = TtlHist.TryGetValue(ttl, out var n) ? n + 1 : 1;
-            if (Samples.Count < 40)
+            if (Samples.Count < 30)
             {
+                var proto = buffer[9] switch { 6 => "TCP", 17 => "UDP", 1 => "ICMP", _ => $"ip{buffer[9]}" };
                 var ports = "";
                 if (buffer[9] is 6 or 17)
                 {
