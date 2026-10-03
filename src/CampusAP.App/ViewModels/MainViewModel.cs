@@ -612,7 +612,8 @@ public partial class MainViewModel : ObservableObject
             var versionFile = Path.Combine(stage, "version.txt");
             if (!File.Exists(versionFile)) return;
             var ver = File.ReadAllText(versionFile).Trim();
-            if (ver.Length == 0 || ver == _stagingDismissedVersion) return;
+            var current = GetType().Assembly.GetName().Version?.ToString(3) ?? "";
+            if (ver.Length == 0 || ver == _stagingDismissedVersion || ver == current) return;
 
             var choice = System.Windows.MessageBox.Show(
                 $"检测到已发布的新版本 v{ver}（当前 v{GetType().Assembly.GetName().Version?.ToString(3)}）。\n\n" +

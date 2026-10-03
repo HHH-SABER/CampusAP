@@ -421,9 +421,11 @@ public sealed class TrafficEngine : IDisposable
                 var srcPort = ReadU16(buffer, ihl);
                 var dstPort = ReadU16(buffer, ihl + 2);
                 // 客户端重定向流量：按流映射表双向各试一次
-                dev = _flows.GetValueOrDefault(new FlowKey(ipProto, new RemoteKey(dst), dstPort, srcPort)).Device
-                   ?? _flows.GetValueOrDefault(new FlowKey(ipProto, new RemoteKey(src), srcPort, dstPort)).Device;
+                if (!_flows.TryGetValue(new FlowKey(ipProto, new RemoteKey(dst), dstPort, srcPort), out var fe4))
+                    _flows.TryGetValue(new FlowKey(ipProto, new RemoteKey(src), srcPort, dstPort), out fe4);
+                dev = fe4?.Device;
                 if (dev is null) return true; // 未映射（宿主自身流量等）：原样放行
+                fe4!.LastSeen = DateTime.UtcNow.Ticks;
                 remote = new RemoteKey(dst);
                 remotePort = dstPort; localPort = srcPort;
                 if (!outbound) { remote = new RemoteKey(src); remotePort = srcPort; localPort = dstPort; }
@@ -451,9 +453,11 @@ public sealed class TrafficEngine : IDisposable
                 if (ipProto is not (6 or 17)) return true;
                 var srcPort = ReadU16(buffer, 40);
                 var dstPort = ReadU16(buffer, 42);
-                dev = _flows.GetValueOrDefault(new FlowKey(ipProto, new RemoteKey(dst6), dstPort, srcPort)).Device
-                   ?? _flows.GetValueOrDefault(new FlowKey(ipProto, new RemoteKey(src6), srcPort, dstPort)).Device;
+                if (!_flows.TryGetValue(new FlowKey(ipProto, new RemoteKey(dst6), dstPort, srcPort), out var fe6))
+                    _flows.TryGetValue(new FlowKey(ipProto, new RemoteKey(src6), srcPort, dstPort), out fe6);
+                dev = fe6?.Device;
                 if (dev is null) return true;
+                fe6!.LastSeen = DateTime.UtcNow.Ticks;
                 remote = new RemoteKey(dst6);
                 remotePort = dstPort; localPort = srcPort;
                 if (!outbound) { remote = new RemoteKey(src6); remotePort = srcPort; localPort = dstPort; }
