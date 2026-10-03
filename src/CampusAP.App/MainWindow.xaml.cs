@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Drawing;
 using System.Windows;
 using CampusAP.App.Services;
 using CampusAP.App.ViewModels;
@@ -9,7 +10,7 @@ namespace CampusAP.App;
 public partial class MainWindow : Window
 {
     private readonly MainViewModel _viewModel = new();
-    private readonly H.NotifyIcon.TaskbarIcon _trayIcon;
+    private readonly System.Windows.Forms.NotifyIcon _trayIcon;
     private bool _forceClose;
     private bool _sessionEnding;
     private bool _hotspotExitConfirmed;
@@ -19,10 +20,26 @@ public partial class MainWindow : Window
         InitializeComponent();
         DataContext = _viewModel;
         Loaded += (_, _) => _viewModel.InitializeCommand.Execute(null);
-        _trayIcon = (H.NotifyIcon.TaskbarIcon)FindResource("TrayIcon");
+
+        // WinForms NotifyIcon 最可靠
+        var iconPath = Environment.ProcessPath!;
+        _trayIcon = new System.Windows.Forms.NotifyIcon
+        {
+            Visible = true,
+            Text = "CampusAP · 校园热点助手",
+            Icon = System.Drawing.Icon.ExtractAssociatedIcon(iconPath) ?? System.Drawing.SystemIcons.Application,
+        };
+        _trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+        var menu = new System.Windows.Forms.ContextMenuStrip();
+        var showItem = new System.Windows.Forms.ToolStripMenuItem("显示主窗口", null, (_, _) => RestoreFromTray());
+        var exitItem = new System.Windows.Forms.ToolStripMenuItem("退出", null, (_, _) => { _forceClose = true; Close(); });
+        menu.Items.Add(showItem);
+        menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+        menu.Items.Add(exitItem);
+        _trayIcon.ContextMenuStrip = menu;
         _viewModel.FloatToggleRequested += () => Dispatcher.Invoke(ToggleFloatWindow);
         // Windows 注销/关机时不弹任何确认框，随系统直接结束
-        Application.Current.SessionEnding += (_, _) => { _sessionEnding = true; _forceClose = true; };
+        System.Windows.Application.Current.SessionEnding += (_, _) => { _sessionEnding = true; _forceClose = true; };
         // 第二个实例启动时唤醒本实例（可能正藏在托盘）
         _ = System.Threading.Tasks.Task.Run(() =>
         {
@@ -31,9 +48,9 @@ public partial class MainWindow : Window
                 Dispatcher.Invoke(RestoreFromTray);
             }
         });
-        Application.Current.Exit += (_, _) =>
+        System.Windows.Application.Current.Exit += (_, _) =>
         {
-            _trayIcon.Visibility = Visibility.Collapsed;
+            _trayIcon.Visible = false;
             _trayIcon.Dispose();
         };
     }
@@ -112,14 +129,13 @@ public partial class MainWindow : Window
             {
                 e.Cancel = true;
                 Hide();
-                _trayIcon.Visibility = Visibility.Visible;
                 try
                 {
-                    // 每次都提示：托盘图标默认收在任务栏右下角"^"溢出区，不提示容易被当成已退出
-                    _trayIcon.ShowNotification("CampusAP",
-                        "已隐藏到系统托盘，点击图标恢复窗口（看不到图标请点任务栏右下角的 ^ 展开）");
+                    _trayIcon.ShowBalloonTip(2000, "CampusAP",
+                        "已隐藏到系统托盘，双击图标恢复窗口",
+                        System.Windows.Forms.ToolTipIcon.Info);
                 }
-                catch { /* 通知失败不影响功能 */ }
+                catch { }
                 base.OnClosing(e);
                 return;
             }
@@ -135,9 +151,9 @@ public partial class MainWindow : Window
         }
 
         // 真正退出：清理托盘图标
-        _trayIcon.Visibility = Visibility.Collapsed;
+        _trayIcon.Visible = false;
         _trayIcon.Dispose();
-        Application.Current.Shutdown();
+        System.Windows.Application.Current.Shutdown();
         base.OnClosing(e);
     }
 

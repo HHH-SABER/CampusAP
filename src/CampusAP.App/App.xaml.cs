@@ -6,7 +6,7 @@ namespace CampusAP.App;
 /// <summary>
 /// Interaction logic for App.xaml
 /// </summary>
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
     /// <summary>单实例信号：第二个实例 Set 它并退出；首实例后台等待并唤醒窗口</summary>
     public static EventWaitHandle? RestoreSignal;

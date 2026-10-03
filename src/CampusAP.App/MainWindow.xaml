@@ -14,21 +14,6 @@
         FontFamily="Microsoft YaHei UI" FontSize="13">
 
     <Window.Resources>
-        <!-- 系统托盘图标：右键菜单（显示/退出），左键恢复窗口 -->
-        <tb:TaskbarIcon x:Key="TrayIcon"
-                        IconSource="/Assets/app.ico"
-                        ToolTipText="CampusAP · 校园热点助手"
-                        Visibility="Collapsed"
-                        TrayLeftMouseDown="TrayIcon_LeftClick">
-            <tb:TaskbarIcon.ContextMenu>
-                <ContextMenu>
-                    <MenuItem Header="显示主窗口" FontWeight="SemiBold" Click="TrayShow_Click"/>
-                    <Separator/>
-                    <MenuItem Header="退出" Click="TrayExit_Click"/>
-                </ContextMenu>
-            </tb:TaskbarIcon.ContextMenu>
-        </tb:TaskbarIcon>
-
         <!-- 卡片 -->
         <Style x:Key="Card" TargetType="Border">
             <Setter Property="Background" Value="White"/>

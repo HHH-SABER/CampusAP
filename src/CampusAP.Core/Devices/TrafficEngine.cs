@@ -131,7 +131,7 @@ public sealed class TrafficEngine : IDisposable
             }
             if (!isClient)
             {
-                Reinject(buffer, len, ref addr); // 非受管流量直通
+                Reinject(buffer, len, ref addr);
                 continue;
             }
 

@@ -5,7 +5,7 @@ using CampusAP.App.ViewModels;
 
 namespace CampusAP.App.Controls;
 
-public partial class DevicePanel : UserControl
+public partial class DevicePanel : System.Windows.Controls.UserControl
 {
     public DevicePanel()
     {
