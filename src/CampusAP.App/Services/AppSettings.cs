@@ -24,6 +24,9 @@ public sealed class AppSettings
     /// <summary>TTL 伪装：把手机上行包 TTL 统一为与 Windows 直发一致（默认开）</summary>
     public bool TtlSpoofEnabled { get; set; } = true;
 
+    /// <summary>夜间模式（深色主题），默认浅色</summary>
+    public bool DarkMode { get; set; }
+
     private static string DirPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CampusAP");
 

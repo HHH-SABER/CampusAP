@@ -6,13 +6,13 @@
         ResizeMode="NoResize"
         WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False"
-        Background="#F8FAFC"
+        Background="{DynamicResource Brush.DialogBg}"
         FontFamily="Microsoft YaHei UI" FontSize="13">
     <StackPanel Margin="26,22,26,20">
-        <TextBlock Text="关闭窗口后要做什么？" FontSize="17" FontWeight="SemiBold" Foreground="#0F172A"/>
+        <TextBlock Text="关闭窗口后要做什么？" FontSize="17" FontWeight="SemiBold" Foreground="{DynamicResource Brush.TextPrimary}"/>
         <TextBlock Text="程序可以继续在系统托盘中运行，热点不会中断。"
-                   FontSize="12" Foreground="#64748B" Margin="0,6,0,14" TextWrapping="Wrap"/>
-        <CheckBox x:Name="RememberCheckBox" Content="记住我的选择，下次不再询问" VerticalContentAlignment="Center"/>
+                   FontSize="12" Foreground="{DynamicResource Brush.TextSecondary}" Margin="0,6,0,14" TextWrapping="Wrap"/>
+        <CheckBox x:Name="RememberCheckBox" Content="记住我的选择，下次不再询问" VerticalContentAlignment="Center" Foreground="{DynamicResource Brush.TextPrimary}"/>
         <Grid Margin="0,20,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -20,10 +20,10 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <Button Content="隐藏到系统托盘" Height="40" Cursor="Hand"
-                    Background="#2563EB" Foreground="White" FontWeight="SemiBold"
+                    Background="{DynamicResource Brush.Accent}" Foreground="White" FontWeight="SemiBold"
                     BorderThickness="0" Click="HideToTray_Click"/>
             <Button Grid.Column="2" Content="直接退出" Height="40" Cursor="Hand"
-                    Background="#64748B" Foreground="White" FontWeight="SemiBold"
+                    Background="{DynamicResource Brush.BtnGray}" Foreground="White" FontWeight="SemiBold"
                     BorderThickness="0" Click="Exit_Click"/>
         </Grid>
     </StackPanel>

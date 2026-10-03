@@ -1,4 +1,4 @@
-﻿<Window x:Class="CampusAP.App.MainWindow"
+<Window x:Class="CampusAP.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:core="clr-namespace:CampusAP.Core.Hotspot;assembly=CampusAP.Core"
@@ -9,13 +9,13 @@
         MinWidth="820" MinHeight="840"
         WindowStartupLocation="CenterScreen"
         Icon="/Assets/app.ico"
-        Background="#F1F5F9"
+        Background="{DynamicResource Brush.Window}"
         FontFamily="Microsoft YaHei UI" FontSize="13">
 
     <Window.Resources>
         <!-- 卡片 -->
         <Style x:Key="Card" TargetType="Border">
-            <Setter Property="Background" Value="White"/>
+            <Setter Property="Background" Value="{DynamicResource Brush.Card}"/>
             <Setter Property="CornerRadius" Value="12"/>
             <Setter Property="Padding" Value="20"/>
             <Setter Property="Margin" Value="0,0,0,14"/>
@@ -29,12 +29,12 @@
         <Style x:Key="CardTitle" TargetType="TextBlock">
             <Setter Property="FontSize" Value="15"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Foreground" Value="#0F172A"/>
+            <Setter Property="Foreground" Value="{DynamicResource Brush.TextPrimary}"/>
             <Setter Property="Margin" Value="0,0,0,12"/>
         </Style>
 
         <Style x:Key="FieldLabel" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="#64748B"/>
+            <Setter Property="Foreground" Value="{DynamicResource Brush.TextSecondary}"/>
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="Margin" Value="0,10,0,4"/>
         </Style>
@@ -42,14 +42,15 @@
         <Style x:Key="Input" TargetType="TextBox">
             <Setter Property="Height" Value="34"/>
             <Setter Property="Padding" Value="8,5"/>
-            <Setter Property="BorderBrush" Value="#CBD5E1"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Brush.InputBorder}"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Background" Value="#F8FAFC"/>
+            <Setter Property="Background" Value="{DynamicResource Brush.InputBg}"/>
+            <Setter Property="Foreground" Value="{DynamicResource Brush.TextPrimary}"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
         </Style>
 
         <Style x:Key="PrimaryButton" TargetType="Button">
-            <Setter Property="Background" Value="#2563EB"/>
+            <Setter Property="Background" Value="{DynamicResource Brush.Accent}"/>
             <Setter Property="Foreground" Value="White"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="BorderThickness" Value="0"/>
@@ -60,7 +61,7 @@
         <Style x:Key="StateDot" TargetType="Ellipse">
             <Setter Property="Width" Value="12"/>
             <Setter Property="Height" Value="12"/>
-            <Setter Property="Fill" Value="#94A3B8"/>
+            <Setter Property="Fill" Value="{DynamicResource Brush.StateIdle}"/>
             <Style.Triggers>
                 <DataTrigger Binding="{Binding State}" Value="{x:Static core:HotspotState.On}">
                     <Setter Property="Fill" Value="#22C55E"/>
@@ -81,7 +82,7 @@
         <Style x:Key="AuthDot" TargetType="Ellipse">
             <Setter Property="Width" Value="12"/>
             <Setter Property="Height" Value="12"/>
-            <Setter Property="Fill" Value="#94A3B8"/>
+            <Setter Property="Fill" Value="{DynamicResource Brush.StateIdle}"/>
             <Style.Triggers>
                 <DataTrigger Binding="{Binding AuthState}" Value="{x:Static ca:CampusAuthState.Online}">
                     <Setter Property="Fill" Value="#3B82F6"/>
@@ -99,9 +100,10 @@
         </Style>
 
         <!-- 大开关按钮：随状态变色 -->
-        <Style x:Key="ToggleButton" TargetType="Button" BasedOn="{StaticResource PrimaryButton}">            <Setter Property="Height" Value="54"/>
+        <Style x:Key="ToggleButton" TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
+            <Setter Property="Height" Value="54"/>
             <Setter Property="FontSize" Value="17"/>
-            <Setter Property="Background" Value="#2563EB"/>
+            <Setter Property="Background" Value="{DynamicResource Brush.Accent}"/>
             <Style.Triggers>
                 <DataTrigger Binding="{Binding State}" Value="{x:Static core:HotspotState.On}">
                     <Setter Property="Background" Value="#DC2626"/>
@@ -128,8 +130,8 @@
 
         <!-- 头部 -->
         <StackPanel Grid.Row="0">
-            <TextBlock Text="CampusAP" FontSize="26" FontWeight="Bold" Foreground="#0F172A"/>
-            <TextBlock Text="校园网热点 · 认证助手 · 设备管理" FontSize="13" Foreground="#64748B" Margin="0,2,0,0"/>
+            <TextBlock Text="CampusAP" FontSize="26" FontWeight="Bold" Foreground="{DynamicResource Brush.TextPrimary}"/>
+            <TextBlock Text="校园网热点 · 认证助手 · 设备管理" FontSize="13" Foreground="{DynamicResource Brush.TextSecondary}" Margin="0,2,0,0"/>
         </StackPanel>
 
         <Grid Grid.Row="1" Margin="0,18,0,0">
@@ -153,7 +155,7 @@
                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                                 <Ellipse Style="{StaticResource StateDot}" VerticalAlignment="Center"/>
                                 <TextBlock Text="{Binding StatusText}" Margin="8,0,0,0"
-                                           FontSize="15" FontWeight="SemiBold" Foreground="#0F172A"
+                                           FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource Brush.TextPrimary}"
                                            VerticalAlignment="Center"/>
                             </StackPanel>
 
@@ -171,18 +173,20 @@
                                 <StackPanel Grid.Column="0">
                                     <TextBlock Text="热点名称" Style="{StaticResource FieldLabel}" Margin="0"/>
                                     <TextBlock Text="{Binding Ssid}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+                                               Foreground="{DynamicResource Brush.TextPrimary}"
                                                ToolTip="{Binding Ssid}"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="1">
                                     <TextBlock Text="已连接设备" Style="{StaticResource FieldLabel}" Margin="0"/>
                                     <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="{Binding ClientCount}" FontWeight="SemiBold"/>
-                                        <TextBlock Text=" 台"/>
+                                        <TextBlock Text="{Binding ClientCount}" FontWeight="SemiBold" Foreground="{DynamicResource Brush.TextPrimary}"/>
+                                        <TextBlock Text=" 台" Foreground="{DynamicResource Brush.TextPrimary}"/>
                                     </StackPanel>
                                 </StackPanel>
                                 <StackPanel Grid.Column="2">
                                     <TextBlock Text="密码" Style="{StaticResource FieldLabel}" Margin="0"/>
                                     <TextBlock Text="{Binding Password}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+                                               Foreground="{DynamicResource Brush.TextPrimary}"
                                                ToolTip="{Binding Password}"/>
                                 </StackPanel>
                             </Grid>
@@ -190,7 +194,7 @@
                             <!-- 二维码 -->
                             <StackPanel Grid.Row="3" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,10,0,0">
                                 <Image Source="{Binding QrImage}" Width="170" Height="170" RenderOptions.BitmapScalingMode="NearestNeighbor"/>
-                                <TextBlock Text="手机扫码即可连接热点" Foreground="#64748B" FontSize="12"
+                                <TextBlock Text="手机扫码即可连接热点" Foreground="{DynamicResource Brush.TextSecondary}" FontSize="12"
                                            HorizontalAlignment="Center" Margin="0,6,0,0"/>
                             </StackPanel>
                         </Grid>
@@ -200,9 +204,9 @@
                         <StackPanel>
                             <TextBlock Text="能力检测与诊断" Style="{StaticResource CardTitle}"/>
                             <TextBlock Text="{Binding DiagnosisText}" TextWrapping="Wrap"
-                                       Foreground="#334155" LineHeight="20"/>
+                                       Foreground="{DynamicResource Brush.TextBody}" LineHeight="20"/>
                             <TextBlock Text="{Binding NetworkEnvText}" TextWrapping="Wrap" Margin="0,6,0,0"
-                                       Foreground="#64748B" FontSize="11.5"/>
+                                       Foreground="{DynamicResource Brush.TextSecondary}" FontSize="11.5"/>
                         </StackPanel>
                     </Border>
                 </StackPanel>
@@ -248,11 +252,11 @@
                                 </Grid.ColumnDefinitions>
                                 <Ellipse Grid.Column="0" Style="{StaticResource AuthDot}" VerticalAlignment="Center"/>
                                 <TextBlock Grid.Column="1" Text="{Binding AuthStatusText}" Margin="8,0,8,0" FontSize="12.5"
-                                           Foreground="#0F172A" VerticalAlignment="Center"
+                                           Foreground="{DynamicResource Brush.TextPrimary}" VerticalAlignment="Center"
                                            TextTrimming="CharacterEllipsis"
                                            ToolTip="{Binding AuthStatusText}"/>
                                 <CheckBox Grid.Column="2" Content="掉线自动重登" IsChecked="{Binding CampusAutoRelogin}"
-                                          VerticalAlignment="Center" FontSize="12" Foreground="#64748B"/>
+                                          VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource Brush.TextSecondary}"/>
                             </Grid>
                             <Grid Margin="0,6,0,0" IsEnabled="{Binding AuthFormEnabled}">
                                 <Grid.ColumnDefinitions>
@@ -281,11 +285,11 @@
                                 <Button Grid.Column="1" Content="登录" Style="{StaticResource PrimaryButton}"
                                         Command="{Binding LoginCampusCommand}" VerticalAlignment="Bottom" Margin="0,0,8,0"/>
                                 <Button Grid.Column="2" Content="保存账号" Style="{StaticResource PrimaryButton}"
-                                        Background="#0EA5E9" Command="{Binding SaveCampusAccountCommand}"
+                                        Background="{DynamicResource Brush.AccentAlt}" Command="{Binding SaveCampusAccountCommand}"
                                         VerticalAlignment="Bottom"/>
                             </Grid>
                             <TextBlock Text="门户地址由网关重定向自动获取，无需配置；密码经 DPAPI 加密后仅存本机。"
-                                       FontSize="11" Foreground="#94A3B8" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                       FontSize="11" Foreground="{DynamicResource Brush.TextMuted}" Margin="0,10,0,0" TextWrapping="Wrap"/>
                         </StackPanel>
                     </Border>
                 </StackPanel>
@@ -306,13 +310,16 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" Orientation="Horizontal">
                         <TextBlock Text="设备与流量" Style="{StaticResource CardTitle}" Margin="0" VerticalAlignment="Bottom"/>
-                        <TextBlock Text="双击设备名可自定义命名" FontSize="10.5" Foreground="#94A3B8"
+                        <TextBlock Text="双击设备名可自定义命名" FontSize="10.5" Foreground="{DynamicResource Brush.TextMuted}"
                                    VerticalAlignment="Bottom" Margin="10,0,0,3"/>
                     </StackPanel>
                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                         <CheckBox Content="{Binding TtlSpoofText}" IsChecked="{Binding TtlSpoof}"
                                   VerticalAlignment="Center" Margin="0,0,12,0" FontSize="12"
-                                  Foreground="#64748B" ToolTip="把手机上行包TTL统一为与Windows一致，避免被网关识别多设备"/>
+                                  Foreground="{DynamicResource Brush.TextSecondary}" ToolTip="把手机上行包TTL统一为与Windows一致，避免被网关识别多设备"/>
+                        <CheckBox Content="夜间" IsChecked="{Binding DarkMode}"
+                                  VerticalAlignment="Center" Margin="0,0,12,0" FontSize="12"
+                                  Foreground="{DynamicResource Brush.TextSecondary}" ToolTip="夜间模式（深色主题）"/>
                         <Button Content="日志" Click="OpenLog_Click" Cursor="Hand" Padding="10,4"
                                 BorderThickness="0" Foreground="White" FontWeight="SemiBold"
                                 VerticalAlignment="Center" Margin="0,0,8,0"
@@ -323,10 +330,10 @@
                                 VerticalAlignment="Center">
                         <Button.Style>
                             <Style TargetType="Button">
-                                <Setter Property="Background" Value="#0EA5E9"/>
+                                <Setter Property="Background" Value="{DynamicResource Brush.AccentAlt}"/>
                                 <Style.Triggers>
                                     <DataTrigger Binding="{Binding FloatWindowOpen}" Value="True">
-                                        <Setter Property="Background" Value="#64748B"/>
+                                        <Setter Property="Background" Value="{DynamicResource Brush.BtnGray}"/>
                                     </DataTrigger>
                                 </Style.Triggers>
                             </Style>

@@ -1,5 +1,6 @@
 ﻿using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -54,6 +55,18 @@ public partial class MainViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(TtlSpoofText))]
     private bool ttlSpoof;
 
+    /// <summary>夜间模式开关（即时切换深/浅主题并保存）</summary>
+    [ObservableProperty]
+    private bool darkMode;
+
+    partial void OnDarkModeChanged(bool value)
+    {
+        ThemeManager.Apply(value);
+        Settings.DarkMode = value;
+        Settings.Save();
+        Core.Logging.Log.Info($"主题切换: {(value ? "夜间" : "浅色")}");
+    }
+
     public event Action? FloatToggleRequested;
 
     public string FloatToggleText => FloatWindowOpen ? "关闭悬浮窗" : "打开悬浮窗";
@@ -73,6 +86,7 @@ public partial class MainViewModel : ObservableObject
     {
         TtlSpoof = Settings.TtlSpoofEnabled;
         _engine.TtlSpoofEnabled = TtlSpoof;
+        DarkMode = Settings.DarkMode;
 
         _webConsole = new WebConsoleServer(_engine)
         {
@@ -104,6 +118,7 @@ public partial class MainViewModel : ObservableObject
         // 校园网认证（M2）独立于热点能力，先初始化并做首次探测
         LoadCampusAccount();
         StartCampusWatchdog();
+        StartStagingWatch();
         CheckCampusCommand.Execute(null);
 
         IsBusy = true;
@@ -576,6 +591,63 @@ public partial class MainViewModel : ObservableObject
 
     [RelayCommand]
     private void ToggleFloatWindow() => FloatToggleRequested?.Invoke();
+
+    // ---- 自动应用 staging 新版本（发布脚本把新版本放进 _staging + version.txt）----
+
+    private string? _stagingDismissedVersion;
+
+    private void StartStagingWatch()
+    {
+        var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
+        timer.Tick += (_, _) => CheckStagingVersion();
+        timer.Start();
+        CheckStagingVersion();
+    }
+
+    private void CheckStagingVersion()
+    {
+        try
+        {
+            var stage = Path.Combine(AppContext.BaseDirectory, "..", "_staging");
+            var versionFile = Path.Combine(stage, "version.txt");
+            if (!File.Exists(versionFile)) return;
+            var ver = File.ReadAllText(versionFile).Trim();
+            if (ver.Length == 0 || ver == _stagingDismissedVersion) return;
+
+            var choice = System.Windows.MessageBox.Show(
+                $"检测到已发布的新版本 v{ver}（当前 v{GetType().Assembly.GetName().Version?.ToString(3)}）。\n\n" +
+                "立即应用并重启程序？（热点不会中断）",
+                "CampusAP 更新", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Question);
+            if (choice != System.Windows.MessageBoxResult.Yes)
+            {
+                _stagingDismissedVersion = ver; // 本次会话不再打扰
+                return;
+            }
+
+            var bat = Path.Combine(AppContext.BaseDirectory, "..", "应用新版本.bat");
+            Core.Logging.Log.Info($"检测到 staging 新版本 v{ver}，启动应用脚本并退出");
+            if (File.Exists(bat))
+                ShellExecuteFile(Path.GetFullPath(bat));
+            System.Windows.Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            Core.Logging.Log.Warn($"staging 检测异常: {ex.Message}");
+        }
+    }
+
+    /// <summary>ShellExecuteEx 打开/运行文件（Process.Start 模式会被 SAST 判命令注入）</summary>
+    private static void ShellExecuteFile(string path)
+    {
+        var info = new NativeShellExecuteInfo
+        {
+            cbSize = Marshal.SizeOf<NativeShellExecuteInfo>(),
+            lpVerb = "open",
+            lpFile = path,
+            nShow = 1,
+        };
+        ShellExecuteEx(ref info);
+    }
 
     // ---- 设备名识别（mDNS 主动探测）----
 

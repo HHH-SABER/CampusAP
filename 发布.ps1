@@ -18,6 +18,7 @@ $stage = "$root\_staging"
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish 失败" }
 
 Remove-Item "$stage\*.pdb" -Force -ErrorAction SilentlyContinue
+Set-Content -Path "$stage\version.txt" -Value $version -Encoding Ascii
 
 # WinDivert 内核驱动与 DLL 必须与主程序同目录（单文件打包不会带上 .sys）
 $native = Join-Path $env:USERPROFILE '.nuget\packages\windivertsharp\1.4.3.2\build\x64'

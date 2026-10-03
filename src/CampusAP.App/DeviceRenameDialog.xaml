@@ -3,15 +3,15 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="设备名称" Width="360" SizeToContent="Height"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        ShowInTaskbar="False" Background="#F9FAFB"
+        ShowInTaskbar="False" Background="{DynamicResource Brush.DialogBgAlt}"
         FontFamily="Microsoft YaHei UI" FontSize="13">
     <StackPanel Margin="18,16,18,16">
-        <TextBlock Text="设备名称（留空则恢复默认显示）" Foreground="#64748B" FontSize="12"/>
-        <TextBox x:Name="NameBox" Height="32" Margin="0,8,0,14" Padding="8,5"
+        <TextBlock Text="设备名称（留空则恢复默认显示）" Foreground="{DynamicResource Brush.TextSecondary}" FontSize="12"/>
+        <TextBox x:Name="NameBox" Height="32" Margin="0,8,0,14" Padding="8,5" Background="{DynamicResource Brush.InputBg}" Foreground="{DynamicResource Brush.TextPrimary}" BorderBrush="{DynamicResource Brush.InputBorder}"
                  VerticalContentAlignment="Center" MaxLength="32"/>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="确定" Width="76" Height="30" IsDefault="True" Click="Ok_Click" Cursor="Hand"
-                    Background="#2563EB" Foreground="White" FontWeight="SemiBold" BorderThickness="0"/>
+                    Background="{DynamicResource Brush.Accent}" Foreground="White" FontWeight="SemiBold" BorderThickness="0"/>
             <Button Content="取消" Width="76" Height="30" Margin="8,0,0,0" IsCancel="True" Cursor="Hand"/>
         </StackPanel>
     </StackPanel>

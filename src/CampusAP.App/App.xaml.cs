@@ -26,6 +26,7 @@ public partial class App : System.Windows.Application
 
         Core.Logging.Log.Trim();
         Core.Logging.Log.Info($"应用启动 v{GetType().Assembly.GetName().Version}（管理员={new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent()).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator)}）");
+        Services.ThemeManager.Apply(Services.AppSettings.Load().DarkMode);
 
         // 提权重启（--start-engine）时旧实例可能还在退出中：短暂等待接管，
         // 否则会撞上"信号已存在"而 Set+退出，表现为"以管理员重启后什么都没发生"。
