@@ -7,67 +7,64 @@ using WinDivertSharp;
 namespace CampusAP.Core.Devices;
 
 /// <summary>
-/// 基于 WinDivert（用户态包过滤）的每设备流量引擎：
-/// 按设备计数上下行、令牌桶限速（超额丢包，由 TCP 拥塞控制自然回压）、整包丢弃实现拉黑。
+/// 基于 WinDivert 的每设备流量引擎（v0.5.0 观察者/执行者架构，真机四轮取证定案）。
 /// 需要管理员权限（加载 WinDivert 内核驱动）。
 ///
-/// 抓包架构（v0.4.0 定案，探针三轮真机取证）：
-/// - **Forward 层（主）**：WFP IPFORWARD 层。Win11 24H2 的移动热点 NAT（winnat 连接重定向型）下，
-///   客户端转发的每个包在 Forward 层出现两遍：第一遍 NAT 前（src/dst=192.168.137.x 原始地址），
-///   第二遍 NAT 后（src/dst=宿主出口 IP）。第一遍用于设备归属、计数与管控；TCP 按"五元组+seq"
-///   去重防止同一包被计两次。
-/// - **Network 层（兜底）**：主机↔客户端本地流量（如 DHCP ACK）只在此层出现；Forward 层未见过
-///   任何客户端包时（Forward 不可用的环境）由它承担计数与管控（旧行为），避免重复计数。
-/// - **过滤器纪律**：只允许 IPv4 比较子句。把 `ipv6.SrcAddr >= fe80:: …` 等 IPv6 比较子句与 IPv4
-///   子句并列在同一过滤器里，会使整个过滤器静默失配（探针对照实验实证：含 v6 子句 0 包，
-///   纯 v4 同点位 31.9 万包）。IPv6 管控是已知缺口：v6 包不进本引擎，正常流通。
+/// 背景：Win11 24H2 移动热点的 NAT 是 winnat 连接重定向型——客户端流量被重定向成本机流量，
+/// 在 Network 层与宿主机自己的流量混合（无法按地址归属）；Forward 层能看到客户端原始地址的
+/// "影子副本"，但丢弃影子不影响真实转发（真机实测：拉黑后 B站照刷）。
+///
+/// 双角色架构：
+/// - **Forward 层 = 观察者**（Sniff 纯旁路）：从客户端原始五元组建立流映射表
+///   (协议, 远端, NAT后本地端口) → 设备。TCP 靠 seq 关联同一包的 NAT 前后两遍副本；
+///   UDP 靠流建立时刻的时间窗关联。
+/// - **Network 层 = 执行者**（drop-and-divert）：宿主机全部流量在此层可见（含被重定向的客户端
+///   流量），按流映射表查归属设备，做计数、限速（令牌桶丢包）、拉黑（整包丢弃）、TTL 伪装。
+///   Network 层的丢包是真实生效的（标准 WinDivert 本机流量过滤语义）。
+/// - 主机↔客户端的本地流量（137.x 互访、DHCP、mDNS）在 Network 层带原始设备地址，直接处理。
 /// </summary>
 public sealed class TrafficEngine : IDisposable
 {
     /// <summary>Win10 移动热点默认私有网段（ICS 经典值 192.168.137.0/24；Win11 可能随机化，由 SetClients 动态补充）</summary>
     private const string DefaultSubnetBase = "192.168.137";
 
-    /// <summary>TTL 伪装目标：Forward 第一遍捕获点在"入向转发减 1 之后、出向转发减 1 之前"，
-    /// 设为 宿主TTL+1 则出口线上正是宿主 TTL（Win11 24H2 默认 TTL=64，老系统 128，注册表动态读取）</summary>
-    private readonly int _spoofTtl;
+    /// <summary>TTL 伪装目标 = 宿主默认 TTL（Network 层出向包的 TTL 即线上 TTL，直接对齐宿主）。
+    /// Win11 24H2 为 64（注册表动态读取），老系统 128。</summary>
+    private readonly int _hostTtl;
 
+    // ===== 设备表 =====
     private readonly ConcurrentDictionary<string, DeviceState> _devices = new();
+    private readonly ConcurrentDictionary<uint, DeviceState> _devices4 = new();
+    private readonly ConcurrentDictionary<V6Addr, DeviceState> _devices6 = new();
 
-    /// <summary>过滤器已覆盖的 IPv4 /24 网段基（前三个八位组）。默认恒含 ICS 经典网段。</summary>
+    // ===== 流映射表（Forward 观察者写，Network 执行者读）=====
+    private readonly ConcurrentDictionary<PendingKey, PendingEntry> _pendingTcp = new();
+    private readonly ConcurrentDictionary<PendingKey, PendingEntry> _pendingUdp = new();
+    private readonly ConcurrentDictionary<FlowKey, FlowEntry> _flows = new();
+
+    // ===== 句柄与线程 =====
+    private IntPtr _f4, _f6, _n4, _n6;
+    private Thread? _f4Thread, _f6Thread, _n4Thread, _n6Thread;
+    private volatile bool _running;
+
     private readonly HashSet<string> _subnetBases = new() { DefaultSubnetBase };
-
     private readonly object _lifecycleLock = new();
 
-    /// <summary>TCP 转发包去重：同一包在 Forward 层出现两遍，按五元组+seq 只计/管控一遍</summary>
-    private readonly HashSet<(uint SrcIp, uint DstIp, ushort SrcPort, ushort DstPort, uint Seq)> _tcpSeen = new();
-    private readonly object _tcpSeenLock = new();
-    private long _tcpSeenLastClear = DateTime.UtcNow.Ticks;
-
-    private IntPtr _forwardHandle;
-    private IntPtr _networkHandle;
-    private Thread? _forwardThread;
-    private Thread? _networkThread;
-    private volatile bool _running;
-    private bool _forwardAvailable;
-
-    // ---- 分层自诊断计数 ----
-    private long _forwardPackets;       // Forward 层见过的包（含非客户端与第二遍）
-    private long _forwardClientPackets; // Forward 层匹配到设备的"第一遍"包
-    private long _networkPackets;       // Network 层见过的包
-    private volatile bool _forwardSeen; // Forward 层见过客户端包 → Network 层退出计数兜底
+    // ---- 自诊断计数 ----
+    private long _observePackets;
+    private long _observeClient;
+    private long _enforcePackets;
+    private long _enforceDropped;
+    private volatile bool _observerSeen;
 
     /// <summary>是否对热点上行包做 TTL 伪装（抹掉多设备指纹）</summary>
     public bool TtlSpoofEnabled { get; set; } = true;
 
     public bool IsRunning => _running;
 
-    /// <summary>两层累计收到的包数（含未匹配设备的），供"抓包是否活着"的运行时判断</summary>
-    public long TotalPacketsSeen =>
-        Interlocked.Read(ref _forwardPackets) + Interlocked.Read(ref _networkPackets);
-
     public TrafficEngine()
     {
-        _spoofTtl = ReadHostTtl() + 1;
+        _hostTtl = ReadHostTtl();
     }
 
     public void Start()
@@ -75,27 +72,30 @@ public sealed class TrafficEngine : IDisposable
         lock (_lifecycleLock)
         {
             if (_running) return;
-            var filter = BuildFilter(_subnetBases);
-            _forwardHandle = OpenHandle(filter, WinDivertLayer.Forward, out var forwardErr);
-            _networkHandle = OpenHandle(filter, WinDivertLayer.Network, out var networkErr);
 
-            if (_forwardHandle == IntPtr.Zero && _networkHandle == IntPtr.Zero)
-                throw new InvalidOperationException(DescribeOpenError(forwardErr != 0 ? forwardErr : networkErr));
+            _f4 = WinDivert.WinDivertOpen(BuildV4Filter(_subnetBases), WinDivertLayer.Forward, 10, WinDivertOpenFlags.Sniff);
+            _f6 = WinDivert.WinDivertOpen("ipv6", WinDivertLayer.Forward, 10, WinDivertOpenFlags.Sniff);
+            _n4 = WinDivert.WinDivertOpen("!loopback", WinDivertLayer.Network, 0, WinDivertOpenFlags.None);
+            _n6 = WinDivert.WinDivertOpen("ipv6 and !loopback", WinDivertLayer.Network, 0, WinDivertOpenFlags.None);
 
-            _forwardAvailable = _forwardHandle != IntPtr.Zero;
+            if (_n4 == IntPtr.Zero && _n6 == IntPtr.Zero)
+            {
+                var err = Marshal.GetLastWin32Error();
+                CloseAll();
+                throw new InvalidOperationException(err switch
+                {
+                    5 => "流量管控需要管理员权限（WinDivert 驱动加载被拒绝）。",
+                    2 => "未找到 WinDivert 驱动文件：WinDivert.dll 和 WinDivert64.sys 需与主程序同目录。",
+                    577 or 1274 => "WinDivert 驱动加载被安全策略/杀毒软件阻止。",
+                    _ => $"WinDivert 打开失败（Win32 错误码 {err}）。",
+                });
+            }
+
             _running = true;
-            _forwardThread = new Thread(() => PacketLoop(WinDivertLayer.Forward))
-            {
-                IsBackground = true,
-                Name = "TrafficEngine-Forward",
-            };
-            _forwardThread.Start();
-            _networkThread = new Thread(() => PacketLoop(WinDivertLayer.Network))
-            {
-                IsBackground = true,
-                Name = "TrafficEngine-Network",
-            };
-            _networkThread.Start();
+            Spawn(ref _f4Thread, ObserveLoop, _f4, true, "Observe-v4");
+            Spawn(ref _f6Thread, ObserveLoop, _f6, false, "Observe-v6");
+            Spawn(ref _n4Thread, EnforceLoop, _n4, true, "Enforce-v4");
+            Spawn(ref _n6Thread, EnforceLoop, _n6, false, "Enforce-v6");
         }
     }
 
@@ -104,19 +104,18 @@ public sealed class TrafficEngine : IDisposable
         lock (_lifecycleLock)
         {
             _running = false;
-            CloseHandles();
-            try { _forwardThread?.Join(1500); } catch { }
-            try { _networkThread?.Join(1500); } catch { }
-            _forwardThread = null;
-            _networkThread = null;
-            _forwardSeen = false;
-            _forwardAvailable = false;
-            lock (_tcpSeenLock) _tcpSeen.Clear();
+            CloseAll();
+            foreach (var t in new[] { _f4Thread, _f6Thread, _n4Thread, _n6Thread })
+                try { t?.Join(1500); } catch { }
+            _f4Thread = _f6Thread = _n4Thread = _n6Thread = null;
+            _observerSeen = false;
+            _pendingTcp.Clear();
+            _pendingUdp.Clear();
+            _flows.Clear();
         }
     }
 
-    /// <summary>同步受管设备集合（由 UI 轮询线程调用，传入系统 tethering API 的客户端 IP）。
-    /// 若出现过滤器未覆盖的 IPv4 网段（Win11 随机网段），重建过滤器并重开句柄。</summary>
+    /// <summary>同步受管设备集合（由 UI 轮询线程调用，传入系统 tethering API 的客户端 IPv4+IPv6）</summary>
     public void SetClients(IEnumerable<string> ips)
     {
         var set = new HashSet<string>(ips);
@@ -124,13 +123,32 @@ public sealed class TrafficEngine : IDisposable
         foreach (var kv in _devices)
             if (!set.Contains(kv.Key)) _devices.TryRemove(kv.Key, out _);
 
+        _devices4.Clear();
+        _devices6.Clear();
+        foreach (var kv in _devices)
+        {
+            if (!IPAddress.TryParse(kv.Key, out var addr)) continue;
+            if (addr.AddressFamily == AddressFamily.InterNetwork)
+            {
+                var b = addr.GetAddressBytes();
+                _devices4.TryAdd((uint)((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]), kv.Value);
+            }
+            else if (addr.AddressFamily == AddressFamily.InterNetworkV6)
+            {
+                _devices6.TryAdd(new V6Addr(addr.GetAddressBytes()), kv.Value);
+            }
+        }
+
+        // Forward 观察层 v4 过滤器需覆盖新网段（Win11 随机网段），变化则重开 F4
         var bases = new HashSet<string>();
         foreach (var ip in set)
-            if (TryGetSubnetBase(ip, out var baseText))
-                bases.Add(baseText);
+        {
+            var octets = ip.Split('.');
+            if (octets.Length == 4 && octets.All(o => byte.TryParse(o, out _)))
+                bases.Add($"{octets[0]}.{octets[1]}.{octets[2]}");
+        }
         bases.Add(DefaultSubnetBase);
-        if (bases.Count > 8) // 网段数异常（不该发生）：只留默认网段防过滤器膨胀
-            bases = new HashSet<string> { DefaultSubnetBase };
+        if (bases.Count > 8) bases = new HashSet<string> { DefaultSubnetBase };
 
         lock (_lifecycleLock)
         {
@@ -138,7 +156,9 @@ public sealed class TrafficEngine : IDisposable
             _subnetBases.Clear();
             foreach (var b in bases) _subnetBases.Add(b);
             if (!_running) return;
-            ReopenHandlesLocked();
+            var old = _f4;
+            _f4 = WinDivert.WinDivertOpen(BuildV4Filter(_subnetBases), WinDivertLayer.Forward, 10, WinDivertOpenFlags.Sniff);
+            if (old != IntPtr.Zero) WinDivert.WinDivertClose(old);
         }
     }
 
@@ -153,13 +173,13 @@ public sealed class TrafficEngine : IDisposable
             }
     }
 
-    /// <summary>设置拉黑状态。即时生效（双向丢包）。</summary>
+    /// <summary>设置拉黑状态。即时生效（Network 层双向丢包）。</summary>
     public void SetBlocked(string ip, bool blocked)
     {
         if (_devices.TryGetValue(ip, out var s)) s.Blocked = blocked;
     }
 
-    /// <summary>读某设备累计上行/下行字节数</summary>
+    /// <summary>读某设备累计上行/下行字节数（Network 层真实流量）</summary>
     public (long Up, long Down) GetTotals(string ip)
     {
         return _devices.TryGetValue(ip, out var s)
@@ -167,84 +187,47 @@ public sealed class TrafficEngine : IDisposable
             : (0, 0);
     }
 
-    /// <summary>分层抓包自诊断文本（UI 状态栏展示，真机验证时一眼判断哪层在工作）</summary>
+    /// <summary>分层自诊断文本（UI 状态栏）</summary>
     public string GetCaptureDiagnostics()
     {
-        var f = Interlocked.Read(ref _forwardPackets);
-        var fc = Interlocked.Read(ref _forwardClientPackets);
-        var n = Interlocked.Read(ref _networkPackets);
-        return _forwardSeen
-            ? $"抓包层 Forward({f:N0}包,设备{fc:N0}) + Network兜底({n:N0})"
-            : _forwardAvailable
-                ? $"Forward({f:N0}包)未见设备流量，Network兜底({n:N0}包)"
-                : $"Forward不可用，Network({n:N0}包)";
+        var o = Interlocked.Read(ref _observePackets);
+        var oc = Interlocked.Read(ref _observeClient);
+        var n = Interlocked.Read(ref _enforcePackets);
+        var d = Interlocked.Read(ref _enforceDropped);
+        return _observerSeen
+            ? $"映射 Forward({o:N0}包,设备{oc:N0}) · 管控 Network({n:N0}包,丢{d:N0}) · 流表{_flows.Count}"
+            : $"Forward观察({o:N0}包)未见设备流量 · Network({n:N0}包)未映射";
     }
+
+    /// <summary>两层累计收到的包数（供"抓包是否活着"的运行时判断）</summary>
+    public long TotalPacketsSeen =>
+        Interlocked.Read(ref _observePackets) + Interlocked.Read(ref _enforcePackets);
 
     public void Dispose() => Stop();
 
-    // ---- 句柄生命周期 ----
+    // ---- 句柄与线程 ----
 
-    private static IntPtr OpenHandle(string filter, WinDivertLayer layer, out int error)
+    private void Spawn(ref Thread? slot, Action<IntPtr, bool> loop, IntPtr handle, bool v4, string name)
     {
-        var handle = WinDivert.WinDivertOpen(filter, layer, 0, WinDivertOpenFlags.None);
-        error = handle == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
-        return handle;
+        slot = new Thread(() => loop(handle, v4)) { IsBackground = true, Name = name };
+        slot.Start();
     }
 
-    private static string DescribeOpenError(int err) => err switch
+    private void CloseAll()
     {
-        5 => "流量管控需要管理员权限（WinDivert 驱动加载被拒绝）。",
-        2 => "未找到 WinDivert 驱动文件：WinDivert.dll 和 WinDivert64.sys 需与主程序同目录。",
-        577 or 1274 => "WinDivert 驱动加载被安全策略/杀毒软件阻止。",
-        _ => $"WinDivert 打开失败（Win32 错误码 {err}）。",
-    };
-
-    private void CloseHandles()
-    {
-        if (_forwardHandle != IntPtr.Zero)
-        {
-            WinDivert.WinDivertClose(_forwardHandle);
-            _forwardHandle = IntPtr.Zero;
-        }
-        if (_networkHandle != IntPtr.Zero)
-        {
-            WinDivert.WinDivertClose(_networkHandle);
-            _networkHandle = IntPtr.Zero;
-        }
+        foreach (var h in new[] { _f4, _f6, _n4, _n6 })
+            if (h != IntPtr.Zero) WinDivert.WinDivertClose(h);
+        _f4 = _f6 = _n4 = _n6 = IntPtr.Zero;
     }
 
-    /// <summary>用当前网段重建过滤器并重开两个句柄（须持 _lifecycleLock 且 _running）。
-    /// 阻塞在旧句柄 Recv 上的线程会随 Close 返回失败，随后读到新句柄继续。</summary>
-    private void ReopenHandlesLocked()
-    {
-        CloseHandles();
-        var filter = BuildFilter(_subnetBases);
-        _forwardHandle = OpenHandle(filter, WinDivertLayer.Forward, out var forwardErr);
-        _networkHandle = OpenHandle(filter, WinDivertLayer.Network, out _);
-        _forwardAvailable = _forwardHandle != IntPtr.Zero;
-        if (_forwardHandle == IntPtr.Zero && _networkHandle == IntPtr.Zero)
-            throw new InvalidOperationException(DescribeOpenError(forwardErr));
-    }
-
-    /// <summary>构造过滤器。纪律：只允许 IPv4 比较子句——IPv6 比较子句混入会使整个过滤器
-    /// 静默失配（探针对照实验实证，见类注释）。</summary>
-    private static string BuildFilter(IEnumerable<string> bases)
+    /// <summary>构造 Forward 观察层 v4 过滤器。纪律：只允许 IPv4 比较子句——IPv6 比较子句混入
+    /// 会使整个过滤器静默失配（探针对照实验实证）。</summary>
+    private static string BuildV4Filter(IEnumerable<string> bases)
     {
         var v4 = string.Join(" or ", bases.Select(b =>
             $"(ip.SrcAddr >= {b}.0 and ip.SrcAddr <= {b}.255) or " +
             $"(ip.DstAddr >= {b}.0 and ip.DstAddr <= {b}.255)"));
         return $"({v4})";
-    }
-
-    private static bool TryGetSubnetBase(string ip, out string baseText)
-    {
-        baseText = "";
-        if (!IPAddress.TryParse(ip, out var addr) || addr.AddressFamily != AddressFamily.InterNetwork)
-            return false;
-        var octets = addr.ToString().Split('.');
-        if (octets.Length != 4) return false;
-        baseText = $"{octets[0]}.{octets[1]}.{octets[2]}";
-        return true;
     }
 
     /// <summary>读宿主默认 TTL（注册表 Tcpip\Parameters\DefaultTtl；Win11 24H2 为 64，老系统 128）</summary>
@@ -262,184 +245,276 @@ public sealed class TrafficEngine : IDisposable
         return 64;
     }
 
-    // ---- 抓包线程 ----
+    // ---- 观察线程（Forward 层，Sniff 只读不拦截）----
 
-    private void PacketLoop(WinDivertLayer layer)
+    private void ObserveLoop(IntPtr handle, bool v4)
     {
         var buffer = new WinDivertBuffer();
         var addr = new WinDivertAddress();
         while (_running)
         {
-            var handle = layer == WinDivertLayer.Forward ? _forwardHandle : _networkHandle;
-            if (handle == IntPtr.Zero)
-            {
-                Thread.Sleep(50); // 句柄重开间隙
-                continue;
-            }
             addr.Reset();
             uint len = 0;
             if (!WinDivert.WinDivertRecv(handle, buffer, ref addr, ref len))
             {
                 if (!_running) break;
-                Thread.Sleep(50); // 句柄已关闭/错误：让出 CPU 等重开
+                Thread.Sleep(30);
                 continue;
             }
+            Interlocked.Increment(ref _observePackets);
+            try { Observe(buffer, len, v4); }
+            catch { /* 单包异常不影响观察循环 */ }
+            // Sniff 模式：原始包自动继续，无需 Reinject
+        }
+    }
 
-            if (layer == WinDivertLayer.Forward)
+    /// <summary>从 Forward 层影子包提取设备流信息：第一遍（设备地址）记 pending，
+    /// 第二遍（NAT 后地址）用 seq 关联出 NAT 端口，登记完整流映射。</summary>
+    private void Observe(WinDivertBuffer buffer, uint len, bool v4)
+    {
+        if (!v4)
+        {
+            if (len < 60 || (buffer[0] >> 4) != 6) return;
+            var src6 = ReadV6(buffer, 8);
+            var dst6 = ReadV6(buffer, 24);
+            var nextHeader = buffer[6];
+            var srcDev = _devices6.GetValueOrDefault(src6);
+            var dstDev = _devices6.GetValueOrDefault(dst6);
+
+            if (srcDev is null && dstDev is null)
             {
-                Interlocked.Increment(ref _forwardPackets);
-                ProcessForwardPacket(buffer, len, ref addr);
+                // NAT 后副本（若 v6 走 NAT66）：seq 关联；纯路由 v6 到不了这
+                if (nextHeader == 6)
+                    TryResolvePass2Tcp(6, src6, dst6, ReadU16(buffer, 40), ReadU16(buffer, 42), ReadU32(buffer, 44));
+                return;
+            }
+
+            var remote = srcDev is not null ? dst6 : src6;
+            var remotePort = srcDev is not null ? ReadU16(buffer, 42) : ReadU16(buffer, 40);
+            var dev6 = srcDev ?? dstDev!;
+            _observerSeen = true;
+            Interlocked.Increment(ref _observeClient);
+            if (nextHeader is 6 or 17)
+            {
+                var pending = new PendingKey(nextHeader, new RemoteKey(remote),
+                    nextHeader == 6 ? ReadU32(buffer, 44) : 0);
+                if (nextHeader == 6) _pendingTcp[pending] = new PendingEntry(dev6, DateTime.UtcNow.Ticks);
+                else _pendingUdp[pending] = new PendingEntry(dev6, DateTime.UtcNow.Ticks);
+            }
+            return;
+        }
+
+        if (len < 20 || (buffer[0] >> 4) != 4) return;
+        var src = ReadU32(buffer, 12);
+        var dst = ReadU32(buffer, 16);
+        var proto = buffer[9];
+        var srcDev4 = _devices4.GetValueOrDefault(src);
+        var dstDev4 = _devices4.GetValueOrDefault(dst);
+
+        if (srcDev4 is null && dstDev4 is null)
+        {
+            // NAT 后副本：上行 remote=dst/local=src，下行 remote=src/local=dst，seq 关联
+            if (proto == 6)
+            {
+                var ihl = (buffer[0] & 0x0F) * 4;
+                if (len < ihl + 20) return;
+                TryResolvePass2TcpV4(dst, ReadU16(buffer, ihl + 2), src, ReadU16(buffer, ihl), ReadU32(buffer, ihl + 4));
+            }
+            return;
+        }
+
+        if (proto is not (6 or 17)) return;
+        var ihl2 = (buffer[0] & 0x0F) * 4;
+        if (len < ihl2 + 4) return;
+        var isUp = srcDev4 is not null;
+        var rKey = new RemoteKey(isUp ? dst : src);
+        var rPort = isUp ? ReadU16(buffer, ihl2 + 2) : ReadU16(buffer, ihl2);
+        var dev = srcDev4 ?? dstDev4!;
+        var seq = proto == 6 ? ReadU32(buffer, ihl2 + 4) : 0;
+
+        _observerSeen = true;
+        Interlocked.Increment(ref _observeClient);
+        var pkey = new PendingKey(proto, rKey, seq);
+        if (proto == 6) _pendingTcp[pkey] = new PendingEntry(dev, DateTime.UtcNow.Ticks);
+        else _pendingUdp[pkey] = new PendingEntry(dev, DateTime.UtcNow.Ticks);
+    }
+
+    /// <summary>TCP：NAT 后副本用 seq 找回设备，登记 (远端, NAT端口) → 设备 的完整流映射。
+    /// 上行副本 remote=dst/local=src；下行副本 remote=src/local=dst。</summary>
+    private void TryResolvePass2TcpV4(uint dstIp, ushort dstPort, uint srcIp, ushort srcPort, uint seq)
+    {
+        var now = DateTime.UtcNow.Ticks;
+        if (_pendingTcp.TryRemove(new PendingKey(6, new RemoteKey(dstIp), seq), out var up))
+            _flows[new FlowKey(6, new RemoteKey(dstIp), dstPort, srcPort)] = new FlowEntry(up!.Device, now);
+        else if (_pendingTcp.TryRemove(new PendingKey(6, new RemoteKey(srcIp), seq), out var down))
+            _flows[new FlowKey(6, new RemoteKey(srcIp), srcPort, dstPort)] = new FlowEntry(down!.Device, now);
+    }
+
+    private void TryResolvePass2Tcp(int proto, V6Addr src, V6Addr dst, ushort srcPort, ushort dstPort, uint seq)
+    {
+        var now = DateTime.UtcNow.Ticks;
+        if (_pendingTcp.TryRemove(new PendingKey(proto, new RemoteKey(dst), seq), out var up))
+            _flows[new FlowKey(proto, new RemoteKey(dst), dstPort, srcPort)] = new FlowEntry(up!.Device, now);
+        else if (_pendingTcp.TryRemove(new PendingKey(proto, new RemoteKey(src), seq), out var down))
+            _flows[new FlowKey(proto, new RemoteKey(src), srcPort, dstPort)] = new FlowEntry(down!.Device, now);
+    }
+
+    // ---- 执行线程（Network 层，drop-and-divert：真正的丢包点）----
+
+    private void EnforceLoop(IntPtr handle, bool v4)
+    {
+        var buffer = new WinDivertBuffer();
+        var addr = new WinDivertAddress();
+        var lastSweep = DateTime.UtcNow.Ticks;
+        while (_running)
+        {
+            addr.Reset();
+            uint len = 0;
+            if (!WinDivert.WinDivertRecv(handle, buffer, ref addr, ref len))
+            {
+                if (!_running) break;
+                Thread.Sleep(30);
+                continue;
+            }
+            Interlocked.Increment(ref _enforcePackets);
+
+            var reinject = true;
+            if (!addr.Loopback)
+            {
+                try { reinject = Enforce(buffer, len, v4, addr.Direction == WinDivertDirection.Outbound); }
+                catch { reinject = true; /* 异常时放行，宁漏勿断 */ }
+            }
+
+            if (DateTime.UtcNow.Ticks - lastSweep > TimeSpan.FromSeconds(10).Ticks)
+            {
+                lastSweep = DateTime.UtcNow.Ticks;
+                SweepStale();
+            }
+
+            if (reinject && len > 0)
+                WinDivert.WinDivertSend(handle, buffer, len, ref addr);
+        }
+    }
+
+    /// <summary>执行层：按流映射归属设备 → 计数/限速/拉黑/TTL 伪装。返回 false = 丢弃该包。</summary>
+    private bool Enforce(WinDivertBuffer buffer, uint len, bool v4, bool outbound)
+    {
+        DeviceState? dev;
+        int ipProto;
+        RemoteKey remote;
+        ushort remotePort, localPort;
+        bool isLocalDeviceTraffic;
+
+        if (v4)
+        {
+            if (len < 20 || (buffer[0] >> 4) != 4) return true;
+            var src = ReadU32(buffer, 12);
+            var dst = ReadU32(buffer, 16);
+            ipProto = buffer[9];
+            var srcDev = _devices4.GetValueOrDefault(src);
+            var dstDev = _devices4.GetValueOrDefault(dst);
+            isLocalDeviceTraffic = srcDev is not null || dstDev is not null;
+
+            if (isLocalDeviceTraffic)
+            {
+                dev = srcDev ?? dstDev!;
+                remote = new RemoteKey(srcDev is not null ? dst : src);
+                remotePort = ReadU16(buffer, srcDev is not null ? 18 : 12);
+                localPort = ReadU16(buffer, srcDev is not null ? 16 : 14);
             }
             else
             {
-                Interlocked.Increment(ref _networkPackets);
-                ProcessNetworkPacket(buffer, len, ref addr);
+                if (ipProto is not (6 or 17)) return true; // ICMP 等不归设备管
+                var ihl = (buffer[0] & 0x0F) * 4;
+                if (len < ihl + 4) return true;
+                var srcPort = ReadU16(buffer, ihl);
+                var dstPort = ReadU16(buffer, ihl + 2);
+                // 客户端重定向流量：按流映射表双向各试一次
+                dev = _flows.GetValueOrDefault(new FlowKey(ipProto, new RemoteKey(dst), dstPort, srcPort)).Device
+                   ?? _flows.GetValueOrDefault(new FlowKey(ipProto, new RemoteKey(src), srcPort, dstPort)).Device;
+                if (dev is null) return true; // 未映射（宿主自身流量等）：原样放行
+                remote = new RemoteKey(dst);
+                remotePort = dstPort; localPort = srcPort;
+                if (!outbound) { remote = new RemoteKey(src); remotePort = srcPort; localPort = dstPort; }
             }
         }
-    }
-
-    /// <summary>Forward 层（转发路径）：设备流量计数 + TTL 伪装 + 限速/拉黑。
-    /// 每个转发包经过本层两遍（NAT 前后），TCP 按"五元组+seq"去重只处理第一遍。</summary>
-    private void ProcessForwardPacket(WinDivertBuffer buffer, uint len, ref WinDivertAddress addr)
-    {
-        if (len < 20 || (buffer[0] >> 4) != 4)
+        else
         {
-            Reinject(_forwardHandle, buffer, len, ref addr); // IPv6 等：直接放行（v6 管控为已知缺口）
-            return;
-        }
+            if (len < 60 || (buffer[0] >> 4) != 6) return true;
+            var src6 = ReadV6(buffer, 8);
+            var dst6 = ReadV6(buffer, 24);
+            ipProto = buffer[6];
+            var srcDev = _devices6.GetValueOrDefault(src6);
+            var dstDev = _devices6.GetValueOrDefault(dst6);
+            isLocalDeviceTraffic = srcDev is not null || dstDev is not null;
 
-        var src = IpToString(buffer, 12);
-        var dst = IpToString(buffer, 16);
-        var srcIsDevice = _devices.TryGetValue(src, out var upState);
-        var dstIsDevice = _devices.TryGetValue(dst, out var downState);
-        if (!srcIsDevice && !dstIsDevice)
-        {
-            Reinject(_forwardHandle, buffer, len, ref addr);
-            return;
-        }
-
-        // 第二遍去重：TCP 同包 NAT 前后两遍五元组+seq 相同；UDP 靠 IP ID 可能去不净，允许少量重复计数
-        if (IsDuplicateSecondPass(buffer, len))
-        {
-            Reinject(_forwardHandle, buffer, len, ref addr);
-            return;
-        }
-
-        _forwardSeen = true;
-        Interlocked.Increment(ref _forwardClientPackets);
-        if (srcIsDevice) Interlocked.Add(ref upState!.TotalUp, len);
-        if (dstIsDevice) Interlocked.Add(ref downState!.TotalDown, len);
-
-        var owner = srcIsDevice ? upState : downState; // 上行按源设备、下行按目的设备管控
-        if (owner!.Blocked) return;                    // 拉黑：双向丢弃（第一遍丢弃即死，第二遍不存在）
-        if (owner.LimitBytesPerSec > 0 && !TryConsumeToken(owner, len))
-            return;                                    // 限速：超额丢弃
-
-        // TTL 伪装：仅客户端→外网的上行包（client↔client 互访不动）。
-        // 捕获点在"入向转发减 1 后、出向转发减 1 前"，故设 宿主TTL+1，出口线上即宿主 TTL。
-        if (TtlSpoofEnabled && srcIsDevice && !dstIsDevice && buffer[8] != _spoofTtl)
-        {
-            buffer[8] = (byte)_spoofTtl;
-            FixIpChecksum(buffer, len);
-        }
-
-        Reinject(_forwardHandle, buffer, len, ref addr);
-    }
-
-    /// <summary>识别 Forward 层的第二遍（同一包 NAT 后的副本）。TCP 依据五元组+seq；
-    /// 每 5 秒整体清空一次旧键防集合膨胀（重传窗口内的旧包可能被重计，量级可忽略）。</summary>
-    private bool IsDuplicateSecondPass(WinDivertBuffer buffer, uint len)
-    {
-        if (buffer[9] != 6) return false; // 只对 TCP 去重
-        var ihl = (buffer[0] & 0x0F) * 4;
-        if (len < ihl + 20) return false;
-
-        uint srcIp = (uint)((buffer[12] << 24) | (buffer[13] << 16) | (buffer[14] << 8) | buffer[15]);
-        uint dstIp = (uint)((buffer[16] << 24) | (buffer[17] << 16) | (buffer[18] << 8) | buffer[19]);
-        ushort srcPort = (ushort)((buffer[ihl] << 8) | buffer[ihl + 1]);
-        ushort dstPort = (ushort)((buffer[ihl + 2] << 8) | buffer[ihl + 3]);
-        uint seq = (uint)((buffer[ihl + 4] << 24) | (buffer[ihl + 5] << 16) | (buffer[ihl + 6] << 8) | buffer[ihl + 7]);
-        var key = (SrcIp: srcIp, DstIp: dstIp, SrcPort: srcPort, DstPort: dstPort, Seq: seq);
-
-        var now = DateTime.UtcNow.Ticks;
-        lock (_tcpSeenLock)
-        {
-            if (now - _tcpSeenLastClear > TimeSpan.FromSeconds(5).Ticks)
+            if (isLocalDeviceTraffic)
             {
-                _tcpSeen.Clear();
-                _tcpSeenLastClear = now;
+                dev = srcDev ?? dstDev!;
+                remote = new RemoteKey(srcDev is not null ? dst6 : src6);
+                remotePort = ReadU16(buffer, srcDev is not null ? 42 : 40);
+                localPort = ReadU16(buffer, srcDev is not null ? 40 : 42);
             }
-            return !_tcpSeen.Add(key);
+            else
+            {
+                if (ipProto is not (6 or 17)) return true;
+                var srcPort = ReadU16(buffer, 40);
+                var dstPort = ReadU16(buffer, 42);
+                dev = _flows.GetValueOrDefault(new FlowKey(ipProto, new RemoteKey(dst6), dstPort, srcPort)).Device
+                   ?? _flows.GetValueOrDefault(new FlowKey(ipProto, new RemoteKey(src6), srcPort, dstPort)).Device;
+                if (dev is null) return true;
+                remote = new RemoteKey(dst6);
+                remotePort = dstPort; localPort = srcPort;
+                if (!outbound) { remote = new RemoteKey(src6); remotePort = srcPort; localPort = dstPort; }
+            }
         }
+
+        // UDP 新流：观察层时间窗关联（TCP 已由 seq 关联）
+        if (ipProto == 17 && !isLocalDeviceTraffic && !_flows.ContainsKey(new FlowKey(ipProto, remote, remotePort, localPort)))
+        {
+            var key = new PendingKey(ipProto, remote, 0);
+            if (_pendingUdp.TryGetValue(key, out var p) && DateTime.UtcNow.Ticks - p.Tick < TimeSpan.FromSeconds(2).Ticks)
+                _flows[new FlowKey(ipProto, remote, remotePort, localPort)] = new FlowEntry(p.Device, DateTime.UtcNow.Ticks);
+        }
+
+        // 计数（outbound=设备上行，inbound=设备下行）
+        if (outbound) Interlocked.Add(ref dev.TotalUp, len);
+        else Interlocked.Add(ref dev.TotalDown, len);
+
+        // 管控：拉黑 / 限速（真实丢包点——不 Send 包就没了）
+        if (dev.Blocked) { Interlocked.Increment(ref _enforceDropped); return false; }
+        if (dev.LimitBytesPerSec > 0 && !TryConsumeToken(dev, len))
+        {
+            Interlocked.Increment(ref _enforceDropped);
+            return false;
+        }
+
+        // TTL 伪装：设备上行出向的互联网流量，TTL 对齐宿主（Network 层的 TTL 就是线上 TTL）
+        if (v4 && TtlSpoofEnabled && outbound && ipProto == 6 && !isLocalDeviceTraffic)
+        {
+            var ihl = (buffer[0] & 0x0F) * 4;
+            if (len >= ihl && buffer[8] != _hostTtl)
+            {
+                buffer[8] = (byte)_hostTtl;
+                FixIpChecksum(buffer, len);
+            }
+        }
+
+        return true;
     }
 
-    /// <summary>Network 层（主机本地路径）兜底：主机↔客户端本地流量始终计数；
-    /// Forward 层不可用/未见流量时按旧行为承担计数与管控。</summary>
-    private void ProcessNetworkPacket(WinDivertBuffer buffer, uint len, ref WinDivertAddress addr)
+    private void SweepStale()
     {
-        if (len < 20 || (buffer[0] >> 4) != 4)
-        {
-            Reinject(_networkHandle, buffer, len, ref addr);
-            return;
-        }
-
-        var src = IpToString(buffer, 12);
-        var dst = IpToString(buffer, 16);
-        var srcIsDevice = _devices.TryGetValue(src, out var upState);
-        var dstIsDevice = _devices.TryGetValue(dst, out var downState);
-        if (!srcIsDevice && !dstIsDevice)
-        {
-            Reinject(_networkHandle, buffer, len, ref addr);
-            return;
-        }
-
-        var degraded = !_forwardSeen; // Forward 层已接管设备流量后，此层只补主机本地包
-        if (srcIsDevice) Interlocked.Add(ref upState!.TotalUp, len);
-        if (dstIsDevice) Interlocked.Add(ref downState!.TotalDown, len);
-        if (!degraded) { Reinject(_networkHandle, buffer, len, ref addr); return; }
-
-        var state = srcIsDevice ? upState : downState;
-        if (state!.Blocked) return;
-        if (state.LimitBytesPerSec > 0 && !TryConsumeToken(state, len))
-            return;
-
-        if (TtlSpoofEnabled && srcIsDevice && !dstIsDevice && buffer[8] != _spoofTtl)
-        {
-            buffer[8] = (byte)_spoofTtl;
-            FixIpChecksum(buffer, len);
-        }
-
-        Reinject(_networkHandle, buffer, len, ref addr);
-    }
-
-    private static void Reinject(IntPtr handle, WinDivertBuffer buffer, uint len, ref WinDivertAddress addr)
-        => WinDivert.WinDivertSend(handle, buffer, len, ref addr);
-
-    private static string IpToString(WinDivertBuffer buffer, int offset)
-        => $"{buffer[offset]}.{buffer[offset + 1]}.{buffer[offset + 2]}.{buffer[offset + 3]}";
-
-    /// <summary>重算 IPv4 头校验和（改了 TTL 后必须调用，否则包被丢弃）。
-    /// 校验和字段在 offset 10-11；12-15 是源地址，绝不能写。</summary>
-    private static void FixIpChecksum(WinDivertBuffer buffer, uint len)
-    {
-        int ihl = (buffer[0] & 0x0F) * 4;   // IP 头长度
-        if (len < ihl || ihl < 20) return;
-
-        buffer[10] = 0;
-        buffer[11] = 0;
-
-        uint sum = 0;
-        for (int i = 0; i < ihl; i += 2)
-        {
-            ushort word = (ushort)((buffer[i] << 8) | buffer[i + 1]);
-            sum += word;
-        }
-        while ((sum >> 16) != 0)
-            sum = (sum & 0xFFFF) + (sum >> 16);
-
-        ushort checksum = (ushort)(~sum);
-        buffer[10] = (byte)(checksum >> 8);
-        buffer[11] = (byte)(checksum & 0xFF);
+        var now = DateTime.UtcNow.Ticks;
+        foreach (var kv in _flows)
+            if (now - kv.Value.LastSeen > TimeSpan.FromMinutes(10).Ticks)
+                _flows.TryRemove(kv.Key, out _);
+        foreach (var kv in _pendingTcp)
+            if (now - kv.Value.Tick > TimeSpan.FromSeconds(30).Ticks)
+                _pendingTcp.TryRemove(kv.Key, out _);
+        foreach (var kv in _pendingUdp)
+            if (now - kv.Value.Tick > TimeSpan.FromSeconds(5).Ticks)
+                _pendingUdp.TryRemove(kv.Key, out _);
     }
 
     private static bool TryConsumeToken(DeviceState s, uint cost)
@@ -454,6 +529,70 @@ public sealed class TrafficEngine : IDisposable
             s.Tokens -= cost;
             return true;
         }
+    }
+
+    /// <summary>重算 IPv4 头校验和（改了 TTL 后必须调用）。校验和字段 offset 10-11；12-15 是源地址。</summary>
+    private static void FixIpChecksum(WinDivertBuffer buffer, uint len)
+    {
+        int ihl = (buffer[0] & 0x0F) * 4;
+        if (len < ihl || ihl < 20) return;
+        buffer[10] = 0;
+        buffer[11] = 0;
+        uint sum = 0;
+        for (int i = 0; i < ihl; i += 2)
+            sum += (ushort)((buffer[i] << 8) | buffer[i + 1]);
+        while ((sum >> 16) != 0)
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        ushort checksum = (ushort)(~sum);
+        buffer[10] = (byte)(checksum >> 8);
+        buffer[11] = (byte)(checksum & 0xFF);
+    }
+
+    private static uint ReadU32(WinDivertBuffer b, int off)
+        => (uint)((b[off] << 24) | (b[off + 1] << 16) | (b[off + 2] << 8) | b[off + 3]);
+
+    private static ushort ReadU16(WinDivertBuffer b, int off)
+        => (ushort)((b[off] << 8) | b[off + 1]);
+
+    private static V6Addr ReadV6(WinDivertBuffer b, int off)
+    {
+        var tmp = new byte[16];
+        for (var i = 0; i < 16; i++) tmp[i] = b[off + i];
+        return new V6Addr(tmp);
+    }
+
+    // ---- 键与条目类型 ----
+
+    /// <summary>IPv6 地址键（128 位折两个 ulong）</summary>
+    private readonly record struct V6Addr(ulong Hi, ulong Lo)
+    {
+        public V6Addr(byte[] b) : this(
+            ((ulong)b[0] << 56) | ((ulong)b[1] << 48) | ((ulong)b[2] << 40) | ((ulong)b[3] << 32) |
+            ((ulong)b[4] << 24) | ((ulong)b[5] << 16) | ((ulong)b[6] << 8) | b[7],
+            ((ulong)b[8] << 56) | ((ulong)b[9] << 48) | ((ulong)b[10] << 40) | ((ulong)b[11] << 32) |
+            ((ulong)b[12] << 24) | ((ulong)b[13] << 16) | ((ulong)b[14] << 8) | b[15]) { }
+    }
+
+    /// <summary>远端键：v4 折进 Hi（主机序 uint），v6 占满 128 位</summary>
+    private readonly record struct RemoteKey(ulong Hi, ulong Lo)
+    {
+        public RemoteKey(uint v4) : this(v4, 0) { }
+        public RemoteKey(V6Addr v6) : this(v6.Hi, v6.Lo) { }
+    }
+
+    /// <summary>TCP pending 键：协议 + 远端 + seq（同一包 NAT 前后 seq 不变）</summary>
+    private readonly record struct PendingKey(int Proto, RemoteKey Remote, uint Seq);
+
+    private sealed record PendingEntry(DeviceState Device, long Tick);
+
+    /// <summary>流键：协议 + 远端 + NAT 后本地端口</summary>
+    private readonly record struct FlowKey(int Proto, RemoteKey Remote, ushort RemotePort, ushort LocalPort);
+
+    private sealed class FlowEntry
+    {
+        public DeviceState Device;
+        public long LastSeen;
+        public FlowEntry(DeviceState dev, long tick) { Device = dev; LastSeen = tick; }
     }
 
     private sealed class DeviceState
