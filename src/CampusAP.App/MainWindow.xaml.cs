@@ -14,6 +14,7 @@ public partial class MainWindow : Window
     private bool _forceClose;
     private bool _sessionEnding;
     private bool _hotspotExitConfirmed;
+    private bool _confirmingHotspotExit;
 
     public MainWindow()
     {
@@ -21,13 +22,23 @@ public partial class MainWindow : Window
         DataContext = _viewModel;
         Loaded += (_, _) => _viewModel.InitializeCommand.Execute(null);
 
-        // WinForms NotifyIcon 最可靠
-        var iconPath = Environment.ProcessPath!;
+        // WinForms NotifyIcon 最可靠；图标从 exe 自身提取（单文件发布后 Assets/app.ico 不在文件系统）。
+        // 提取失败（异常安全兜底）不影响主流程。
+        System.Drawing.Icon icon;
+        try
+        {
+            icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!)
+                   ?? System.Drawing.SystemIcons.Application;
+        }
+        catch
+        {
+            icon = System.Drawing.SystemIcons.Application;
+        }
         _trayIcon = new System.Windows.Forms.NotifyIcon
         {
             Visible = true,
             Text = "CampusAP · 校园热点助手",
-            Icon = System.Drawing.Icon.ExtractAssociatedIcon(iconPath) ?? System.Drawing.SystemIcons.Application,
+            Icon = icon,
         };
         _trayIcon.DoubleClick += (_, _) => RestoreFromTray();
         var menu = new System.Windows.Forms.ContextMenuStrip();
@@ -45,7 +56,8 @@ public partial class MainWindow : Window
         {
             while (App.RestoreSignal is System.Threading.EventWaitHandle signal && signal.WaitOne())
             {
-                Dispatcher.Invoke(RestoreFromTray);
+                try { Dispatcher.Invoke(RestoreFromTray); }
+                catch { break; /* 应用退出中：Dispatcher 已停，结束等待循环 */ }
             }
         });
         System.Windows.Application.Current.Exit += (_, _) =>
@@ -133,10 +145,17 @@ public partial class MainWindow : Window
 
         // 热点由系统托管：程序退出后 Windows 会继续共享网络（这次交接时"程序消失但手机仍连着"的根源）。
         // 真正退出前给用户一次选择，覆盖窗口退出/托盘退出/记住的直接退出三条路径；注销/关机时跳过。
+        // 注意：这里必须取消本次关闭、把确认对话框推迟到关闭流程之外（Dispatcher.BeginInvoke）——
+        // 在 OnClosing 里同步再调 Close() 属于关闭期重入，WPF 会抛
+        // "在窗口关闭期间无法调用 Show/Close"（事件日志 1026 实录，曾致退出时闪退）。
         if (!_hotspotExitConfirmed && !_sessionEnding && _viewModel.State == HotspotState.On)
         {
             e.Cancel = true;
-            ConfirmExitWithHotspotOn();
+            if (!_confirmingHotspotExit)
+            {
+                _confirmingHotspotExit = true;
+                Dispatcher.BeginInvoke(ConfirmExitWithHotspotOn);
+            }
             return;
         }
 
@@ -160,6 +179,7 @@ public partial class MainWindow : Window
 
         if (result == System.Windows.MessageBoxResult.Cancel)
         {
+            _confirmingHotspotExit = false;
             _forceClose = false; // 撤销托盘退出等路径留下的标记，恢复常规关闭流程
             return;
         }
@@ -170,8 +190,9 @@ public partial class MainWindow : Window
             catch { /* 关闭热点失败时按用户所选行为继续退出 */ }
         }
 
+        _confirmingHotspotExit = false;
         _hotspotExitConfirmed = true;
         _forceClose = true;
-        Close();
+        Close(); // 此刻已不在 OnClosing 调用栈内，Close 合法
     }
 }

@@ -13,16 +13,27 @@ public partial class App : System.Windows.Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
-        RestoreSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "CampusAP_RestoreSignal", out var createdNew);
-        if (!createdNew)
+        // 提权重启（--start-engine）时旧实例可能还在退出中：短暂等待接管，
+        // 否则会撞上"信号已存在"而 Set+退出，表现为"以管理员重启后什么都没发生"。
+        // 普通双开：立即唤醒已有实例并退出。
+        var isAdminRestart = Environment.GetCommandLineArgs().Contains("--start-engine");
+        for (var attempt = 0; ; attempt++)
         {
-            // 已有实例（可能藏在托盘）：唤醒它而不是再开一个。
-            // 这里直接 Shutdown 且不创建主窗口——StartupUri 已移除，主窗口只在首实例路径手动创建，
-            // 否则会出现"未显示就被关闭"的窗口，OnClosing 里的对话框设置 Owner 会崩。
-            RestoreSignal.Set();
-            Shutdown();
-            return;
+            RestoreSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "CampusAP_RestoreSignal", out var createdNew);
+            if (createdNew) break; // 成为首实例
+
+            if (!isAdminRestart || attempt >= 25) // 等了 5 秒仍接管失败：按普通双开处理
+            {
+                RestoreSignal.Set();
+                Shutdown();
+                return;
+            }
+            RestoreSignal.Dispose();
+            Thread.Sleep(200);
         }
+
+        // 这里直接 Shutdown 且不创建主窗口——StartupUri 已移除，主窗口只在首实例路径手动创建，
+        // 否则会出现"未显示就被关闭"的窗口，OnClosing 里的对话框设置 Owner 会崩。
         base.OnStartup(e);
         new MainWindow().Show();
     }

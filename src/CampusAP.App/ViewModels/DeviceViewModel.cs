@@ -31,16 +31,23 @@ public partial class DeviceViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IpLineVisibility))]
     private string hostName = "";
 
+    /// <summary>mDNS 探测到的设备名（随机 MAC 时最可靠的名字来源，如"Xiaomi 14"），空=未探到</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplayName))]
+    [NotifyPropertyChangedFor(nameof(IpLineVisibility))]
+    private string mdnsName = "";
+
     [ObservableProperty] private string downRate = "";
     [ObservableProperty] private string upRate = "";
     [ObservableProperty] private string totalText = "";
 
-    /// <summary>列表首行显示名：自定义名 > 厂商+型号 > IP</summary>
+    /// <summary>列表首行显示名：自定义名 > mDNS 设备名 > 厂商+型号 > 主机名 > IP</summary>
     public string DisplayName
     {
         get
         {
             if (!string.IsNullOrWhiteSpace(CustomName)) return CustomName;
+            if (!string.IsNullOrWhiteSpace(MdnsName)) return MdnsName;
             if (!string.IsNullOrWhiteSpace(Vendor))
             {
                 var model = ExtractModel(HostName);

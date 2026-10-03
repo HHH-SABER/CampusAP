@@ -58,6 +58,10 @@ public sealed class TrafficEngine : IDisposable
 
     public bool IsRunning => _running;
 
+    /// <summary>两层累计收到的包数（含未匹配设备的），供"抓包是否活着"的运行时判断</summary>
+    public long TotalPacketsSeen =>
+        Interlocked.Read(ref _forwardPackets) + Interlocked.Read(ref _networkPackets);
+
     public void Start()
     {
         lock (_lifecycleLock)

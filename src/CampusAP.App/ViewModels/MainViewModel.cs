@@ -558,6 +558,8 @@ public partial class MainViewModel : ObservableObject
         try
         {
             _engine.Start();
+            _lastSeenPackets = 0;
+            _lastTrafficSeenAt = DateTime.UtcNow;
             try { _webConsole.Start(DeriveGatewayIp()); }
             catch (Exception ex) { EngineStatusText = "管控已开，但Web管理页启动失败：" + ex.Message; }
             EngineRunning = true;
@@ -573,6 +575,29 @@ public partial class MainViewModel : ObservableObject
 
     [RelayCommand]
     private void ToggleFloatWindow() => FloatToggleRequested?.Invoke();
+
+    // ---- 设备名识别（mDNS 主动探测）----
+
+    private readonly HashSet<string> _mdnsProbed = new();
+    private long _lastSeenPackets;
+    private DateTime _lastTrafficSeenAt = DateTime.UtcNow;
+
+    /// <summary>向设备发 mDNS 单播查询拿友好名（随机 MAC 时唯一可靠来源），每设备每会话只探一次</summary>
+    private async void ProbeDeviceNameAsync(DeviceViewModel device)
+    {
+        if (!_mdnsProbed.Add(device.Ip)) return;
+        try
+        {
+            var name = await MdnsNameProbe.ProbeAsync(device.Ip);
+            if (string.IsNullOrWhiteSpace(name)) return;
+            var target = Devices.FirstOrDefault(d => d.Ip == device.Ip);
+            if (target is not null) target.MdnsName = name;
+        }
+        catch
+        {
+            // 探测失败静默，显示名回退主机名/IP
+        }
+    }
 
     /// <summary>从当前设备列表推导热点网关（首设备网段的 .1）；无设备返回 null（Web 服务用默认 192.168.137.1）</summary>
     private string? DeriveGatewayIp()
@@ -727,6 +752,19 @@ public partial class MainViewModel : ObservableObject
                 ? $" · 手机访问 http://{_webConsole.Gateway}:{WebConsoleServer.Port} 管理设备"
                 : "";
             EngineStatusText = "流量管控运行中" + webPart + " · " + _engine.GetCaptureDiagnostics();
+
+            // 两层持续 0 包 = 本机热点的 NAT 方式让 WinDivert 抓不到设备流量：明确告警，不静默失效
+            var seen = _engine.TotalPacketsSeen;
+            if (seen != _lastSeenPackets)
+            {
+                _lastSeenPackets = seen;
+                _lastTrafficSeenAt = DateTime.UtcNow;
+            }
+            else if ((DateTime.UtcNow - _lastTrafficSeenAt).TotalSeconds > 10)
+            {
+                EngineStatusText += " ｜⚠ 未捕获到设备流量：限速/拉黑/流量统计在本机暂不生效" +
+                                    "（用 tools\\CaptureProbe 抓取证后反馈）";
+            }
         }
 
         var elapsed = (DateTime.UtcNow - _lastRateSample).TotalSeconds;
@@ -748,6 +786,7 @@ public partial class MainViewModel : ObservableObject
                     vm.CustomName = savedName;
                 Devices.Add(vm);
                 ResolveHostNameAsync(client.Ip);
+                ProbeDeviceNameAsync(vm);
             }
 
             var (up, down) = _engine.GetTotals(client.Ip);

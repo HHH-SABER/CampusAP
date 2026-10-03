@@ -30,3 +30,9 @@ Thumbs.db
 # ===== 分发产物（走 GitHub Releases，不入库）=====
 安装包/
 build_log.txt
+
+# ===== 诊断工具/暂存产物 =====
+_staging/
+应用新版本.bat
+
+tools/CaptureProbe/probebin/
