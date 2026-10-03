@@ -7,6 +7,9 @@
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"
 #endif
+#ifndef PublishDir
+  #define PublishDir "..\发布"
+#endif
 #define MyAppPublisher "CampusAP"
 #define MyAppExeName "CampusAP.exe"
 
@@ -32,9 +35,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标:"; Flags: checkedonce
 
 [Files]
-Source: "..\发布\CampusAP.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\发布\WinDivert.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\发布\WinDivert64.sys"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PublishDir}\CampusAP.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PublishDir}\WinDivert.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PublishDir}\WinDivert64.sys"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\CampusAP"; Filename: "{app}\{#MyAppExeName}"

@@ -1,6 +1,7 @@
 ﻿# CampusAP 发布脚本：单文件发布 + WinDivert 原生文件就位 + Inno Setup 安装包（检测到则自动打包）
 # 用法：powershell -File 发布.ps1
 # 版本单源在 Directory.Build.props：改版本只改那里，本脚本把版本传给安装包（/DMyAppVersion）。
+# 程序侧会监视 _staging\version.txt 自动弹窗应用新版本；发布目录被锁时安装包直接从 _staging 打，永不漏打。
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 
@@ -10,7 +11,24 @@ $version = @($propsXml.Project.PropertyGroup.Version | Where-Object { $_ }) | Se
 if (-not $version) { throw "无法从 Directory.Build.props 读取版本号" }
 Write-Output "版本：v$version"
 
-# ---- 编译 + 单文件发布（先进暂存目录，再尝试落入发布目录；被运行中的程序锁定时给出一键替换脚本）----
+# ---- Inno Setup 探测（提前，锁定分支也要打安装包）----
+$iscc = @(
+    (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+    (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')
+) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+
+function Build-Installer([string]$publishDir) {
+    if (-not $iscc) {
+        Write-Output "`n未检测到 Inno Setup 6（ISCC.exe），已跳过安装包打包。"
+        return
+    }
+    & $iscc "/DMyAppVersion=$version" "/DPublishDir=$publishDir" "$root\installer\CampusAP.iss"
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup 打包失败" }
+    Write-Output "`n安装包已生成：安装包\CampusAP-Setup-v$version.exe"
+}
+
+# ---- 编译 + 单文件发布（先进暂存目录，再尝试落入发布目录）----
 $stage = "$root\_staging"
 & dotnet publish "$root\src\CampusAP.App" -c Release -r win-x64 --self-contained true `
     -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
@@ -18,7 +36,7 @@ $stage = "$root\_staging"
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish 失败" }
 
 Remove-Item "$stage\*.pdb" -Force -ErrorAction SilentlyContinue
-Set-Content -Path "$stage\version.txt" -Value $version -Encoding Ascii
+Set-Content -Path (Join-Path $stage 'version.txt') -Value $version -Encoding Ascii
 
 # WinDivert 内核驱动与 DLL 必须与主程序同目录（单文件打包不会带上 .sys）
 $native = Join-Path $env:USERPROFILE '.nuget\packages\windivertsharp\1.4.3.2\build\x64'
@@ -33,47 +51,67 @@ foreach ($f in 'CampusAP.exe', 'WinDivert.dll', 'WinDivert64.sys') {
 }
 
 if ($locked) {
-    # 生成一键替换脚本：自提权 → 结束运行中的 CampusAP → 交换文件 → 重启
-    $applyBat = @'
-@echo off
-chcp 65001 >nul
-net session >nul 2>&1
-if %errorlevel% neq 0 (
-  powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
-  exit /b
-)
-cd /d "%~dp0"
-echo Stopping running CampusAP...
-taskkill /IM CampusAP.exe /F >nul 2>&1
-timeout /t 2 /nobreak >nul
-copy /y "_staging\CampusAP.exe" "发布\CampusAP.exe" >nul
-copy /y "_staging\WinDivert.dll" "发布\WinDivert.dll" >nul
-copy /y "_staging\WinDivert64.sys" "发布\WinDivert64.sys" >nul
-if errorlevel 1 ( echo Swap FAILED. & pause & exit /b 1 )
-rd /s /q _staging
-echo Updated. Launching new version...
-start "" "发布\CampusAP.exe"
+    # 生成交接脚本：apply_update.ps1（等待进程退出+逐文件校验）+ 两行 bat 启动器（自提权）
+    $applyPs1 = @'
+# CampusAP staged-update applier (ASCII only; self-elevates; waits for exit; verifies swap).
+$ErrorActionPreference = 'Stop'
+function Is-Admin {
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+if (-not (Is-Admin)) {
+    Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -NoProfile -File `"$PSCommandPath`""
+    exit
+}
+$root = Split-Path -Parent $PSCommandPath
+$stage = Join-Path $root '_staging'
+if (-not (Test-Path (Join-Path $stage 'CampusAP.exe'))) {
+    Write-Host 'No staged version found (_staging\CampusAP.exe). Nothing to apply.'
+    Start-Sleep 5
+    exit 1
+}
+
+Write-Host '[1/4] Stopping running CampusAP...'
+Get-Process CampusAP -ErrorAction SilentlyContinue | Stop-Process -Force
+$deadline = (Get-Date).AddSeconds(10)
+while ((Get-Date) -lt $deadline -and (Get-Process CampusAP -ErrorAction SilentlyContinue)) { Start-Sleep -Milliseconds 300 }
+
+Write-Host '[2/4] Swapping files (staged -> publish)...'
+$pub = (Get-ChildItem $root -Directory | Where-Object {
+    $_.Name -ne '_staging' -and (Test-Path (Join-Path $_.FullName 'CampusAP.exe'))
+} | Select-Object -First 1).FullName
+if (-not $pub) { Write-Host 'Publish dir not found.'; Start-Sleep 5; exit 1 }
+$failed = $false
+foreach ($f in 'CampusAP.exe', 'WinDivert.dll', 'WinDivert64.sys') {
+    try {
+        Copy-Item (Join-Path $stage $f) (Join-Path $pub $f) -Force -ErrorAction Stop
+    } catch {
+        Write-Host "  FAILED: $f : $($_.Exception.Message)"
+        $failed = $true
+    }
+}
+if ($failed) {
+    Write-Host 'Swap FAILED - staged files kept in _staging, rerun this script after closing CampusAP.'
+    Start-Sleep 8
+    exit 1
+}
+
+Write-Host '[3/4] Cleaning staging...'
+Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+
+Write-Host '[4/4] Launching updated version...'
+Start-Process (Join-Path $pub 'CampusAP.exe')
+Write-Host "Done. Applied version: $((Get-Item (Join-Path $pub 'CampusAP.exe')).VersionInfo.ProductVersion)"
+Start-Sleep 4
 '@
-    Set-Content -Path "$root\应用新版本.bat" -Value $applyBat -Encoding UTF8
+    Set-Content -Path "$root\apply_update.ps1" -Value $applyPs1 -Encoding UTF8
+    Set-Content -Path "$root\apply_update.bat" -Value "powershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0apply_update.ps1`"" -Encoding Ascii
     Write-Output "`n发布目录被运行中的 CampusAP 锁定：新版本已备好于 _staging，"
-    Write-Output "双击 应用新版本.bat 一键完成替换并重启（或关闭程序后重跑本脚本）。"
+    Write-Output "程序会自动弹窗提示应用（或双击 apply_update.bat）。安装包改从 _staging 打。"
+    Build-Installer $stage
     exit 0
 }
 
 Write-Output "`n发布完成："
 Get-ChildItem "$root\发布" | Format-Table Name, @{L='Size(MB)';E={'{0:N1}' -f ($_.Length/1MB)}} -AutoSize
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
-
-# ---- 安装包（检测到 Inno Setup 6 就顺带打包；产物走 GitHub Releases，不入库）----
-$iscc = @(
-    (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
-    (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
-    (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')
-) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-if ($iscc) {
-    & $iscc "/DMyAppVersion=$version" "$root\installer\CampusAP.iss"
-    if ($LASTEXITCODE -ne 0) { throw "Inno Setup 打包失败" }
-    Write-Output "`n安装包已生成：安装包\CampusAP-Setup-v$version.exe"
-} else {
-    Write-Output "`n未检测到 Inno Setup 6（ISCC.exe），已跳过安装包打包。"
-}
+Build-Installer "$root\发布"

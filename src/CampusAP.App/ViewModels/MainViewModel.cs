@@ -624,7 +624,7 @@ public partial class MainViewModel : ObservableObject
                 return;
             }
 
-            var bat = Path.Combine(AppContext.BaseDirectory, "..", "应用新版本.bat");
+            var bat = Path.Combine(AppContext.BaseDirectory, "..", "apply_update.bat");
             Core.Logging.Log.Info($"检测到 staging 新版本 v{ver}，启动应用脚本并退出");
             if (File.Exists(bat))
                 ShellExecuteFile(Path.GetFullPath(bat));

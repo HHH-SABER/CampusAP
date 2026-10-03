@@ -38,4 +38,8 @@ _staging/
 tools/CaptureProbe/probebin/
 tools/CaptureProbe/probe_result.txt
 _diag.cmd
+应用新版本.bat
+apply_update.ps1
+apply_update.bat
+apply_update.log
 
