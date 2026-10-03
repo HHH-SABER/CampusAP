@@ -525,6 +525,7 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void ToggleControl()
     {
+        Core.Logging.Log.Info($"管控开关点击: EngineRunning={EngineRunning} IsAdmin={IsAdmin} 热点={State} 设备数={Devices.Count}");
         if (EngineRunning)
         {
             _webConsole.Stop();

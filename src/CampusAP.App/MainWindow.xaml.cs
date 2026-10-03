@@ -68,6 +68,18 @@ public partial class MainWindow : Window
     }
 
     private FloatWindow? _floatWindow;
+    private LogWindow? _logWindow;
+
+    private void OpenLog_Click(object sender, RoutedEventArgs e)
+    {
+        if (_logWindow is null)
+        {
+            _logWindow = new LogWindow();
+            _logWindow.Closed += (_, _) => _logWindow = null;
+        }
+        _logWindow.Show();
+        _logWindow.Activate();
+    }
 
     private void ToggleFloatWindow()
     {

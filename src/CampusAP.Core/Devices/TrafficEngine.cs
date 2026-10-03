@@ -81,6 +81,7 @@ public sealed class TrafficEngine : IDisposable
             if (_n4 == IntPtr.Zero && _n6 == IntPtr.Zero)
             {
                 var err = Marshal.GetLastWin32Error();
+                Logging.Log.Error($"引擎启动失败: 执行层句柄打不开 Win32={err}（观察层v4={_f4 != IntPtr.Zero} v6={_f6 != IntPtr.Zero}）");
                 CloseAll();
                 throw new InvalidOperationException(err switch
                 {
@@ -92,6 +93,7 @@ public sealed class TrafficEngine : IDisposable
             }
 
             _running = true;
+            Logging.Log.Info($"引擎启动: 观察层v4={_f4 != IntPtr.Zero} v6={_f6 != IntPtr.Zero} 执行层v4={_n4 != IntPtr.Zero} v6={_n6 != IntPtr.Zero} 宿主TTL={_hostTtl} 设备数={_devices.Count}");
             Spawn(ref _f4Thread, ObserveLoop, _f4, true, "Observe-v4");
             Spawn(ref _f6Thread, ObserveLoop, _f6, false, "Observe-v6");
             Spawn(ref _n4Thread, EnforceLoop, _n4, true, "Enforce-v4");
@@ -104,6 +106,7 @@ public sealed class TrafficEngine : IDisposable
         lock (_lifecycleLock)
         {
             _running = false;
+            Logging.Log.Info($"引擎停止: 观察={Interlocked.Read(ref _observePackets)} 执行={Interlocked.Read(ref _enforcePackets)} 丢弃={Interlocked.Read(ref _enforceDropped)}");
             CloseAll();
             foreach (var t in new[] { _f4Thread, _f6Thread, _n4Thread, _n6Thread })
                 try { t?.Join(1500); } catch { }
@@ -155,6 +158,7 @@ public sealed class TrafficEngine : IDisposable
             if (_subnetBases.IsSubsetOf(bases) && bases.IsSubsetOf(_subnetBases)) return;
             _subnetBases.Clear();
             foreach (var b in bases) _subnetBases.Add(b);
+            Logging.Log.Info($"网段表更新: {string.Join(";", _subnetBases)}（重开观察层 v4 句柄）");
             if (!_running) return;
             var old = _f4;
             _f4 = WinDivert.WinDivertOpen(BuildV4Filter(_subnetBases), WinDivertLayer.Forward, 10, WinDivertOpenFlags.Sniff);
@@ -165,6 +169,7 @@ public sealed class TrafficEngine : IDisposable
     /// <summary>设置限速（字节/秒，0=不限）。即时生效。</summary>
     public void SetLimit(string ip, long bytesPerSec)
     {
+        Logging.Log.Info($"{ip} 限速 → {(bytesPerSec == 0 ? "不限" : $"{bytesPerSec / 125000.0:N1} Mbps ({bytesPerSec} B/s)")}");
         if (_devices.TryGetValue(ip, out var s))
             lock (s.TokenLock)
             {
@@ -176,6 +181,7 @@ public sealed class TrafficEngine : IDisposable
     /// <summary>设置拉黑状态。即时生效（Network 层双向丢包）。</summary>
     public void SetBlocked(string ip, bool blocked)
     {
+        Logging.Log.Info($"{ip} {(blocked ? "拉黑" : "解除拉黑")}");
         if (_devices.TryGetValue(ip, out var s)) s.Blocked = blocked;
     }
 
@@ -366,6 +372,7 @@ public sealed class TrafficEngine : IDisposable
         var buffer = new WinDivertBuffer();
         var addr = new WinDivertAddress();
         var lastSweep = DateTime.UtcNow.Ticks;
+        var lastErrLogged = DateTime.UtcNow.Ticks - TimeSpan.FromSeconds(60).Ticks;
         while (_running)
         {
             addr.Reset();
@@ -373,6 +380,12 @@ public sealed class TrafficEngine : IDisposable
             if (!WinDivert.WinDivertRecv(handle, buffer, ref addr, ref len))
             {
                 if (!_running) break;
+                // Recv 失败限频记录（首次+每 30 秒一条），便于诊断句柄被关/驱动异常
+                if (DateTime.UtcNow.Ticks - lastErrLogged > TimeSpan.FromSeconds(30).Ticks)
+                {
+                    lastErrLogged = DateTime.UtcNow.Ticks;
+                    Logging.Log.Warn($"Enforce{(v4 ? "-v4" : "-v6")} Recv 失败: Win32 {Marshal.GetLastWin32Error()}");
+                }
                 Thread.Sleep(30);
                 continue;
             }
@@ -382,7 +395,15 @@ public sealed class TrafficEngine : IDisposable
             if (!addr.Loopback)
             {
                 try { reinject = Enforce(buffer, len, v4, addr.Direction == WinDivertDirection.Outbound); }
-                catch { reinject = true; /* 异常时放行，宁漏勿断 */ }
+                catch (Exception ex)
+                {
+                    reinject = true; // 异常时放行，宁漏勿断
+                    if (DateTime.UtcNow.Ticks - lastErrLogged > TimeSpan.FromSeconds(30).Ticks)
+                    {
+                        lastErrLogged = DateTime.UtcNow.Ticks;
+                        Logging.Log.Error($"Enforce{(v4 ? "-v4" : "-v6")} 异常: {ex.Message}");
+                    }
+                }
             }
 
             if (DateTime.UtcNow.Ticks - lastSweep > TimeSpan.FromSeconds(10).Ticks)
@@ -515,7 +536,20 @@ public sealed class TrafficEngine : IDisposable
         foreach (var kv in _pendingUdp)
             if (now - kv.Value.Tick > TimeSpan.FromSeconds(5).Ticks)
                 _pendingUdp.TryRemove(kv.Key, out _);
+
+        // 统计心跳（30 秒一条）：观察/执行/丢弃/流表/映射覆盖
+        if (now - _lastHeartbeat > TimeSpan.FromSeconds(30).Ticks)
+        {
+            _lastHeartbeat = now;
+            var mapped = _flows.Count;
+            var top = string.Join(", ", _devices.Values
+                .Where(d => Interlocked.Read(ref d.TotalDown) > 0 || Interlocked.Read(ref d.TotalUp) > 0)
+                .Take(4));
+            Logging.Log.Info($"心跳 观察={Interlocked.Read(ref _observePackets):N0}(设备{Interlocked.Read(ref _observeClient):N0}) 执行={Interlocked.Read(ref _enforcePackets):N0} 丢弃={Interlocked.Read(ref _enforceDropped):N0} 流表={mapped} [{top}]");
+        }
     }
+
+    private long _lastHeartbeat;
 
     private static bool TryConsumeToken(DeviceState s, uint cost)
     {

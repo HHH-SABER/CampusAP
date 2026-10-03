@@ -13,6 +13,20 @@ public partial class App : System.Windows.Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        // 全局异常钩子：任何崩溃先落日志（此前只能靠 Windows 事件日志 1026 反查）
+        DispatcherUnhandledException += (_, e) =>
+            Core.Logging.Log.Error("UI未处理异常: " + e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            Core.Logging.Log.Error("致命异常: " + e.ExceptionObject);
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            Core.Logging.Log.Error("未观察任务异常: " + e.Exception);
+            e.SetObserved();
+        };
+
+        Core.Logging.Log.Trim();
+        Core.Logging.Log.Info($"应用启动 v{GetType().Assembly.GetName().Version}（管理员={new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent()).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator)}）");
+
         // 提权重启（--start-engine）时旧实例可能还在退出中：短暂等待接管，
         // 否则会撞上"信号已存在"而 Set+退出，表现为"以管理员重启后什么都没发生"。
         // 普通双开：立即唤醒已有实例并退出。

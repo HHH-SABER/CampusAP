@@ -313,6 +313,10 @@
                         <CheckBox Content="{Binding TtlSpoofText}" IsChecked="{Binding TtlSpoof}"
                                   VerticalAlignment="Center" Margin="0,0,12,0" FontSize="12"
                                   Foreground="#64748B" ToolTip="把手机上行包TTL统一为与Windows一致，避免被网关识别多设备"/>
+                        <Button Content="日志" Click="OpenLog_Click" Cursor="Hand" Padding="10,4"
+                                BorderThickness="0" Foreground="White" FontWeight="SemiBold"
+                                VerticalAlignment="Center" Margin="0,0,8,0"
+                                ToolTip="实时诊断日志（引擎心跳/丢包统计/异常）"/>
                         <Button Content="{Binding FloatToggleText}"
                                 Command="{Binding ToggleFloatWindowCommand}" Cursor="Hand"
                                 Padding="10,4" BorderThickness="0" Foreground="White" FontWeight="SemiBold"
