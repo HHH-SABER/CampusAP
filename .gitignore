@@ -2,6 +2,7 @@
 bin/
 obj/
 publish/
+publish-ci/
 发布/
 
 # ===== IDE =====
@@ -26,8 +27,6 @@ settings.local.json
 Thumbs.db
 .DS_Store
 
-# 安装包
+# ===== 分发产物（走 GitHub Releases，不入库）=====
 安装包/
-发布/
-
 build_log.txt

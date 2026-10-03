@@ -1,4 +1,4 @@
-namespace CampusAP.Core.Hotspot;
+﻿namespace CampusAP.Core.Hotspot;
 
 /// <summary>热点整体状态（后端无关，UI 只看这个）</summary>
 public enum HotspotState

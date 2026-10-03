@@ -1,4 +1,5 @@
-using System.Net;
+﻿using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CampusAP.Core.Devices;
@@ -7,7 +8,14 @@ namespace CampusAP.Core.Web;
 
 /// <summary>
 /// 内置 Web 管理服务（参考 WiFi共享精灵 TX_Httpd.exe）。
-/// 手机连热点后浏览器访问 http://192.168.137.1:8899 即可看设备列表、限速、拉黑，无需装 App。
+/// 手机连热点后浏览器访问 http://热点网关:8899 即可看设备列表、限速、拉黑，无需装 App。
+///
+/// 安全模型：
+/// - 热点本身是信任边界（能连上的都知道 WiFi 密码），但仍加了一层一次性令牌：
+///   管理页 URL 带 ?token=，API 调用必须回传同一令牌。没有令牌的跨源请求（如手机浏览器里
+///   恶意网页发出的 fire-and-forget POST）会被 403 挡下，防 CSRF。
+/// - 设备名等动态数据在页内渲染前做 HTML 转义，防恶意主机名注入管理页。
+/// - 只绑定热点网关地址与 localhost，不暴露到宿主机上行网卡。
 /// </summary>
 public sealed class WebConsoleServer : IDisposable
 {
@@ -15,9 +23,10 @@ public sealed class WebConsoleServer : IDisposable
     private HttpListener? _listener;
     private Thread? _worker;
     private volatile bool _running;
+    private string _token = "";
 
-    /// <summary>热点网关地址：ICS 默认 192.168.137.1</summary>
-    public const string GatewayIp = "192.168.137.1";
+    /// <summary>热点网关 IP：ICS 经典默认 192.168.137.1；Win11 随机网段时由启动方传入实际值</summary>
+    public string Gateway { get; private set; } = "192.168.137.1";
     public const int Port = 8899;
 
     /// <summary>获取当前设备列表的回调（由 UI 层注入）</summary>
@@ -36,13 +45,16 @@ public sealed class WebConsoleServer : IDisposable
         _engine = engine;
     }
 
-    public void Start()
+    /// <param name="gatewayIp">热点网关地址（取自当前客户端网段 .1；空则用 ICS 经典默认）</param>
+    public void Start(string? gatewayIp = null)
     {
         if (_running) return;
+        Gateway = string.IsNullOrWhiteSpace(gatewayIp) ? "192.168.137.1" : gatewayIp;
+        _token = RandomNumberGenerator.GetHexString(16); // 一次性令牌，每次启动轮换
         try
         {
             _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://{GatewayIp}:{Port}/");
+            _listener.Prefixes.Add($"http://{Gateway}:{Port}/");
             _listener.Prefixes.Add($"http://localhost:{Port}/");
             _listener.Start();
             _running = true;
@@ -75,10 +87,16 @@ public sealed class WebConsoleServer : IDisposable
             try
             {
                 var path = ctx.Request.Url?.AbsolutePath ?? "/";
+                if (path != "/" && !IsAuthorized(ctx))
+                {
+                    ctx.Response.StatusCode = 403;
+                    ctx.Response.Close();
+                    continue;
+                }
                 switch (path)
                 {
                     case "/":
-                        SendHtml(ctx, PageHtml);
+                        SendHtml(ctx, PageHtml.Replace("__TOKEN__", _token));
                         break;
                     case "/api/devices":
                         SendJson(ctx, GetDevicesJson());
@@ -97,6 +115,23 @@ public sealed class WebConsoleServer : IDisposable
             }
             catch { /* 单次请求异常不影响服务 */ }
         }
+    }
+
+    /// <summary>管理页以外的一切端点都要求令牌（查询串 ?token= 或 X-Web-Token 头）</summary>
+    private bool IsAuthorized(HttpListenerContext ctx)
+    {
+        if (string.IsNullOrEmpty(_token)) return false;
+        var query = ctx.Request.QueryString["token"];
+        var header = ctx.Request.Headers["X-Web-Token"];
+        return FixedTimeEquals(query, _token) || FixedTimeEquals(header, _token);
+    }
+
+    private static bool FixedTimeEquals(string? a, string b)
+    {
+        if (string.IsNullOrEmpty(a) || a.Length != b.Length) return false;
+        var diff = 0;
+        for (var i = 0; i < b.Length; i++) diff |= a[i] ^ b[i];
+        return diff == 0;
     }
 
     private string GetDevicesJson()
@@ -206,9 +241,16 @@ select { padding:6px; border:1px solid #cbd5e1; border-radius:8px; font-size:13p
 <h1>CampusAP 设备管理</h1>
 <div id="devices">加载中…</div>
 <script>
+const AUTH = '__TOKEN__';
+// HTML 转义：设备名/主机名来自局域网，不可信，渲染前必须转义
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
 async function load() {
   try {
-    const r = await fetch('/api/devices');
+    const r = await fetch('/api/devices?token=' + encodeURIComponent(AUTH));
     const d = await r.json();
     const el = document.getElementById('devices');
     if (!d.devices.length) { el.innerHTML = '<div class="card">暂无设备连接</div>'; return; }
@@ -216,35 +258,37 @@ async function load() {
       <div class="card">
         <div class="row">
           <div>
-            <div class="dev-name">${dev.name || dev.ip}${dev.blocked ? '<span class="tag tag-blocked">已拉黑</span>' : ''}</div>
-            <div class="dev-meta">${dev.vendor ? dev.vendor + ' · ' : ''}${dev.mac} · ${dev.ip}</div>
-            <div class="dev-rates">↑ ${dev.upRate} · ↓ ${dev.downRate}</div>
+            <div class="dev-name">${esc(dev.name || dev.ip)}${dev.blocked ? '<span class="tag tag-blocked">已拉黑</span>' : ''}</div>
+            <div class="dev-meta">${esc(dev.vendor ? dev.vendor + ' · ' : '')}${esc(dev.mac)} · ${esc(dev.ip)}</div>
+            <div class="dev-rates">↑ ${esc(dev.upRate)} · ↓ ${esc(dev.downRate)}</div>
           </div>
         </div>
         <div class="btns">
-          <select onchange="setLimit('${dev.ip}', this.value)">
+          <select onchange="setLimit('${esc(dev.ip)}', this.value)">
             <option value="0">不限速</option>
             <option value="2500000" ${dev.limit===2500000?'selected':''}>20 Mbps</option>
             <option value="625000" ${dev.limit===625000?'selected':''}>5 Mbps</option>
             <option value="125000" ${dev.limit===125000?'selected':''}>1 Mbps</option>
             <option value="32000" ${dev.limit===32000?'selected':''}>256 Kbps</option>
           </select>
-          <button class="${dev.blocked?'btn-unblock':'btn-block'}" onclick="toggleBlock('${dev.ip}', ${!dev.blocked})">
+          <button class="${dev.blocked?'btn-unblock':'btn-block'}" onclick="toggleBlock('${esc(dev.ip)}', ${!dev.blocked})">
             ${dev.blocked ? '解除拉黑' : '拉黑'}
           </button>
         </div>
       </div>`).join('');
   } catch(e) {
-    document.getElementById('devices').innerHTML = '<div class="card">连接失败：' + e.message + '</div>';
+    document.getElementById('devices').innerHTML = '<div class="card">连接失败：' + esc(e.message) + '</div>';
   }
 }
 async function setLimit(ip, bytes) {
-  await fetch('/api/limit', {method:'POST', headers:{'Content-Type':'application/json'},
+  await fetch('/api/limit?token=' + encodeURIComponent(AUTH), {method:'POST',
+    headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ip, bytesPerSec: parseInt(bytes)})});
   load();
 }
 async function toggleBlock(ip, blocked) {
-  await fetch('/api/block', {method:'POST', headers:{'Content-Type':'application/json'},
+  await fetch('/api/block?token=' + encodeURIComponent(AUTH), {method:'POST',
+    headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ip, blocked})});
   load();
 }

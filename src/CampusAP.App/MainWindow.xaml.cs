@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Drawing;
 using System.Windows;
 using CampusAP.App.Services;
@@ -78,16 +78,6 @@ public partial class MainWindow : Window
             _floatWindow.Show();
             _viewModel.FloatWindowOpen = true;
         }
-    }
-
-    private void TrayIcon_LeftClick(object sender, RoutedEventArgs e) => RestoreFromTray();
-
-    private void TrayShow_Click(object sender, RoutedEventArgs e) => RestoreFromTray();
-
-    private void TrayExit_Click(object sender, RoutedEventArgs e)
-    {
-        _forceClose = true;
-        Close();
     }
 
     private void RestoreFromTray()

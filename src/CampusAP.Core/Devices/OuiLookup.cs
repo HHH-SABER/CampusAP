@@ -1,4 +1,4 @@
-namespace CampusAP.Core.Devices;
+﻿namespace CampusAP.Core.Devices;
 
 /// <summary>
 /// 根据 MAC 地址前 3 字节（OUI）识别设备厂商。

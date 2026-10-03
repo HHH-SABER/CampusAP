@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Net;
 using System.Runtime.InteropServices;
@@ -558,11 +558,11 @@ public partial class MainViewModel : ObservableObject
         try
         {
             _engine.Start();
-            try { _webConsole.Start(); }
+            try { _webConsole.Start(DeriveGatewayIp()); }
             catch (Exception ex) { EngineStatusText = "管控已开，但Web管理页启动失败：" + ex.Message; }
             EngineRunning = true;
             EngineStatusText = _webConsole.IsRunning
-                ? $"流量管控运行中 · 手机访问 http://{WebConsoleServer.GatewayIp}:{WebConsoleServer.Port} 管理设备"
+                ? $"流量管控运行中 · 手机访问 http://{_webConsole.Gateway}:{WebConsoleServer.Port} 管理设备"
                 : "流量管控运行中";
         }
         catch (Exception ex)
@@ -573,6 +573,18 @@ public partial class MainViewModel : ObservableObject
 
     [RelayCommand]
     private void ToggleFloatWindow() => FloatToggleRequested?.Invoke();
+
+    /// <summary>从当前设备列表推导热点网关（首设备网段的 .1）；无设备返回 null（Web 服务用默认 192.168.137.1）</summary>
+    private string? DeriveGatewayIp()
+    {
+        foreach (var d in Devices)
+        {
+            var octets = d.Ip.Split('.');
+            if (octets.Length == 4 && octets.All(o => byte.TryParse(o, out _)))
+                return $"{octets[0]}.{octets[1]}.{octets[2]}.1";
+        }
+        return null;
+    }
 
     private void OnLimitRequested(DeviceViewModel vm, int index)
     {
@@ -712,7 +724,7 @@ public partial class MainViewModel : ObservableObject
 
             // 分层抓包自诊断：Forward 层是否真正抓到设备流量，真机验证时一眼可判
             var webPart = _webConsole.IsRunning
-                ? $" · 手机访问 http://{WebConsoleServer.GatewayIp}:{WebConsoleServer.Port} 管理设备"
+                ? $" · 手机访问 http://{_webConsole.Gateway}:{WebConsoleServer.Port} 管理设备"
                 : "";
             EngineStatusText = "流量管控运行中" + webPart + " · " + _engine.GetCaptureDiagnostics();
         }

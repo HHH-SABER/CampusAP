@@ -1,4 +1,4 @@
-using Windows.Networking.Connectivity;
+﻿using Windows.Networking.Connectivity;
 using Windows.Networking.NetworkOperators;
 
 namespace CampusAP.Core.Hotspot;

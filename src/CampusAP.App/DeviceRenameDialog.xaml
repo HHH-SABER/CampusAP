@@ -1,4 +1,4 @@
-<Window x:Class="CampusAP.App.DeviceRenameDialog"
+﻿<Window x:Class="CampusAP.App.DeviceRenameDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="设备名称" Width="360" SizeToContent="Height"

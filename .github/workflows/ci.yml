@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build (Release)
+        run: dotnet build CampusAP.sln -c Release
+
+      - name: Publish (single-file + WinDivert files)
+        run: dotnet publish src/CampusAP.App -c Release -r win-x64 --self-contained true
+              -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+              -p:EnableCompressionInSingleFile=true -o publish-ci
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CampusAP-${{ github.sha }}
+          path: |
+            publish-ci/CampusAP.exe
+            publish-ci/WinDivert.dll
+            publish-ci/WinDivert64.sys
+          retention-days: 14

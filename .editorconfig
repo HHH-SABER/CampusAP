@@ -1,0 +1,26 @@
+root = true
+
+# 全部文件：UTF-8 带 BOM（中文注释在 PowerShell 5.1 等工具链下最稳妥）
+[*]
+charset = utf-8-bom
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{cs,csproj,props,xaml}]
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml,json}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.ps1]
+indent_style = space
+indent_size = 4
+
+[Makefile]
+indent_style = tab

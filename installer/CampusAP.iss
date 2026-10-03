@@ -1,8 +1,12 @@
-; CampusAP Inno Setup 脚本
-; 用法：先跑 发布.ps1，再跑 ISCC.exe installer\CampusAP.iss
+﻿; CampusAP Inno Setup 脚本
+; 用法：先跑 发布.ps1（会自动以 /DMyAppVersion=<版本> 调用本脚本），
+;       或手动：ISCC.exe /DMyAppVersion=0.3.0 installer\CampusAP.iss
+; 版本单源在 Directory.Build.props，不要在这里改版本。
 
 #define MyAppName "CampusAP"
-#define MyAppVersion "0.2.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0-dev"
+#endif
 #define MyAppPublisher "CampusAP"
 #define MyAppExeName "CampusAP.exe"
 
@@ -22,7 +26,7 @@ WizardStyle=modern
 PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=dialog
 UninstallDisplayIcon={app}\{#MyAppExeName}
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesInstallIn64BitMode=x64compatible
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标:"; Flags: checkedonce
