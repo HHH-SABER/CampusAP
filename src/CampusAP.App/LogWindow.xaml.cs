@@ -89,6 +89,7 @@ public partial class LogWindow : Window
         public IntPtr hkeyClass;
         public uint dwHotKey;
         public IntPtr hIcon;
+        public IntPtr hProcess; // SHELLEXECUTEINFOW 完整尺寸为 112 字节；缺此字段时 cbSize=104 会被 shell32 直接拒绝
     }
 
     [System.Runtime.InteropServices.DllImport("shell32.dll", EntryPoint = "ShellExecuteExW", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]

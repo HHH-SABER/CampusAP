@@ -4,7 +4,7 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <!-- 热点启停不需要管理员；M4 的 WinDivert 限速功能再做按需提权 -->
+        <!-- 热点启停不需要管理员；WinDivert 流量统计/TTL 伪装再做按需提权 -->
         <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>

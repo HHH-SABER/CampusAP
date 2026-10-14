@@ -7,21 +7,23 @@ using WinDivertSharp;
 namespace CampusAP.Core.Devices;
 
 /// <summary>
-/// 基于 WinDivert 的每设备流量引擎（v0.5.0 观察者/执行者架构，真机四轮取证定案）。
+/// 基于 WinDivert 的每设备流量引擎：流量统计 + TTL 伪装（真机四轮取证定案）。
 /// 需要管理员权限（加载 WinDivert 内核驱动）。
 ///
 /// 背景：Win11 24H2 移动热点的 NAT 是 winnat 连接重定向型——客户端流量被重定向成本机流量，
 /// 在 Network 层与宿主机自己的流量混合（无法按地址归属）；Forward 层能看到客户端原始地址的
-/// "影子副本"，但丢弃影子不影响真实转发（真机实测：拉黑后 B站照刷）。
+/// "影子副本"。2026-10-14 终审：NDIS 层存在双份投递（热点口发射量=实际数据 2 倍），
+/// WFP 各层丢弃副本对真实投递无效，按设备限速/拉黑在本机形态原理性不可行（详见交接文档 1.5/1.6），
+/// 已决策移除管控功能——引擎只做统计与 TTL 伪装。
 ///
-/// 双角色架构：
+/// 双层结构：
 /// - **Forward 层 = 观察者**（Sniff 纯旁路）：从客户端原始五元组建立流映射表
 ///   (协议, 远端, NAT后本地端口) → 设备。TCP 靠 seq 关联同一包的 NAT 前后两遍副本；
 ///   UDP 靠流建立时刻的时间窗关联。
-/// - **Network 层 = 执行者**（drop-and-divert）：宿主机全部流量在此层可见（含被重定向的客户端
-///   流量），按流映射表查归属设备，做计数、限速（令牌桶丢包）、拉黑（整包丢弃）、TTL 伪装。
-///   Network 层的丢包是真实生效的（标准 WinDivert 本机流量过滤语义）。
-/// - 主机↔客户端的本地流量（137.x 互访、DHCP、mDNS）在 Network 层带原始设备地址，直接处理。
+/// - **Network 层 = 计数/TTL**：宿主机全部流量在此层可见（含被重定向的客户端流量），
+///   按流映射表查归属设备做上下行计数；对设备上行出向的互联网流量做 TTL 伪装（对齐宿主 TTL，
+///   规避校园网多设备检测）。
+/// - 主机↔客户端的本地流量（137.x 互访、DHCP、mDNS）在 Network 层带原始设备地址，直接计数。
 /// </summary>
 public sealed class TrafficEngine : IDisposable
 {
@@ -53,11 +55,15 @@ public sealed class TrafficEngine : IDisposable
     private long _observePackets;
     private long _observeClient;
     private long _enforcePackets;
-    private long _enforceDropped;
+    private long _enforceMapped;
+    private long _enforceUnmapped;
     private volatile bool _observerSeen;
 
     /// <summary>是否对热点上行包做 TTL 伪装（抹掉多设备指纹）</summary>
     public bool TtlSpoofEnabled { get; set; } = true;
+
+    /// <summary>观察层累计识别到的设备包数（含 NAT 前影子副本），供"设备流量是否活跃"判断</summary>
+    public long ObservedClientPackets => Interlocked.Read(ref _observeClient);
 
     public bool IsRunning => _running;
 
@@ -86,7 +92,7 @@ public sealed class TrafficEngine : IDisposable
                 CloseAll();
                 throw new InvalidOperationException(err switch
                 {
-                    5 => "流量管控需要管理员权限（WinDivert 驱动加载被拒绝）。",
+                    5 => "流量统计/TTL 伪装需要管理员权限（WinDivert 驱动加载被拒绝）。",
                     2 => "未找到 WinDivert 驱动文件：WinDivert.dll 和 WinDivert64.sys 需与主程序同目录。",
                     577 or 1274 => "WinDivert 驱动加载被安全策略/杀毒软件阻止。",
                     _ => $"WinDivert 打开失败（Win32 错误码 {err}）。",
@@ -107,7 +113,7 @@ public sealed class TrafficEngine : IDisposable
         lock (_lifecycleLock)
         {
             _running = false;
-            Logging.Log.Info($"引擎停止: 观察={Interlocked.Read(ref _observePackets)} 执行={Interlocked.Read(ref _enforcePackets)} 丢弃={Interlocked.Read(ref _enforceDropped)}");
+            Logging.Log.Info($"引擎停止: 观察={Interlocked.Read(ref _observePackets)} 执行={Interlocked.Read(ref _enforcePackets)}");
             CloseAll();
             foreach (var t in new[] { _f4Thread, _f6Thread, _n4Thread, _n6Thread })
                 try { t?.Join(1500); } catch { }
@@ -123,7 +129,11 @@ public sealed class TrafficEngine : IDisposable
     public void SetClients(IEnumerable<string> ips)
     {
         var set = new HashSet<string>(ips);
-        foreach (var ip in set) _devices.TryAdd(ip, new DeviceState());
+        foreach (var ip in set)
+        {
+            var ds = _devices.GetOrAdd(ip, _ => new DeviceState());
+            ds.Ip = ip;
+        }
         foreach (var kv in _devices)
             if (!set.Contains(kv.Key)) _devices.TryRemove(kv.Key, out _);
 
@@ -146,25 +156,6 @@ public sealed class TrafficEngine : IDisposable
         Logging.Log.Info($"设备表同步: {set.Count} 台（{string.Join(", ", set)}）");
     }
 
-    /// <summary>设置限速（字节/秒，0=不限）。即时生效。</summary>
-    public void SetLimit(string ip, long bytesPerSec)
-    {
-        Logging.Log.Info($"{ip} 限速 → {(bytesPerSec == 0 ? "不限" : $"{bytesPerSec / 125000.0:N1} Mbps ({bytesPerSec} B/s)")}");
-        if (_devices.TryGetValue(ip, out var s))
-            lock (s.TokenLock)
-            {
-                s.LimitBytesPerSec = bytesPerSec;
-                s.Tokens = Math.Min(s.Tokens, bytesPerSec);
-            }
-    }
-
-    /// <summary>设置拉黑状态。即时生效（Network 层双向丢包）。</summary>
-    public void SetBlocked(string ip, bool blocked)
-    {
-        Logging.Log.Info($"{ip} {(blocked ? "拉黑" : "解除拉黑")}");
-        if (_devices.TryGetValue(ip, out var s)) s.Blocked = blocked;
-    }
-
     /// <summary>读某设备累计上行/下行字节数（Network 层真实流量）</summary>
     public (long Up, long Down) GetTotals(string ip)
     {
@@ -179,10 +170,11 @@ public sealed class TrafficEngine : IDisposable
         var o = Interlocked.Read(ref _observePackets);
         var oc = Interlocked.Read(ref _observeClient);
         var n = Interlocked.Read(ref _enforcePackets);
-        var d = Interlocked.Read(ref _enforceDropped);
+        var m = Interlocked.Read(ref _enforceMapped);
+        var u = Interlocked.Read(ref _enforceUnmapped);
         return _observerSeen
-            ? $"映射 Forward({o:N0}包,设备{oc:N0}) · 管控 Network({n:N0}包,丢{d:N0}) · 流表{_flows.Count}"
-            : $"Forward观察({o:N0}包)未见设备流量 · Network({n:N0}包)未映射";
+            ? $"映射 Forward({o:N0}包,设备{oc:N0}) · Network({n:N0}包,映射{m:N0}/未映射{u:N0}) · 流表{_flows.Count}"
+            : $"Forward观察({o:N0}包)未见设备流量 · Network({n:N0}包,映射{m:N0}/未映射{u:N0})";
     }
 
     /// <summary>两层累计收到的包数（供"抓包是否活着"的运行时判断）</summary>
@@ -270,6 +262,7 @@ public sealed class TrafficEngine : IDisposable
             var dev6 = srcDev ?? dstDev!;
             _observerSeen = true;
             Interlocked.Increment(ref _observeClient);
+            Interlocked.Increment(ref dev6.ObservedPackets);
             if (nextHeader is 6 or 17)
             {
                 var pending = new PendingKey(nextHeader, new RemoteKey(remote),
@@ -310,6 +303,7 @@ public sealed class TrafficEngine : IDisposable
 
         _observerSeen = true;
         Interlocked.Increment(ref _observeClient);
+        Interlocked.Increment(ref dev.ObservedPackets);
         var pkey = new PendingKey(proto, rKey, seq);
         if (proto == 6) _pendingTcp[pkey] = new PendingEntry(dev, DateTime.UtcNow.Ticks);
         else _pendingUdp[pkey] = new PendingEntry(dev, DateTime.UtcNow.Ticks);
@@ -387,7 +381,7 @@ public sealed class TrafficEngine : IDisposable
         }
     }
 
-    /// <summary>执行层：按流映射归属设备 → 计数/限速/拉黑/TTL 伪装。返回 false = 丢弃该包。</summary>
+    /// <summary>Network 层：按流映射归属设备 → 上下行计数 + TTL 伪装。返回值恒 true（reinject 语义保留）。</summary>
     private bool Enforce(WinDivertBuffer buffer, uint len, bool v4, bool outbound)
     {
         DeviceState? dev;
@@ -424,7 +418,13 @@ public sealed class TrafficEngine : IDisposable
                 if (!_flows.TryGetValue(new FlowKey(ipProto, new RemoteKey(dst), dstPort, srcPort), out var fe4))
                     _flows.TryGetValue(new FlowKey(ipProto, new RemoteKey(src), srcPort, dstPort), out fe4);
                 dev = fe4?.Device;
-                if (dev is null) return true; // 未映射（宿主自身流量等）：原样放行
+                if (dev is null)
+                {
+                    // 未映射（宿主机自身流量，或观察层尚未建立映射的客户端流量）：原样放行，仅计数供覆盖率诊断
+                    Interlocked.Increment(ref _enforceUnmapped);
+                    return true;
+                }
+                Interlocked.Increment(ref _enforceMapped);
                 fe4!.LastSeen = DateTime.UtcNow.Ticks;
                 remote = new RemoteKey(dst);
                 remotePort = dstPort; localPort = srcPort;
@@ -456,7 +456,8 @@ public sealed class TrafficEngine : IDisposable
                 if (!_flows.TryGetValue(new FlowKey(ipProto, new RemoteKey(dst6), dstPort, srcPort), out var fe6))
                     _flows.TryGetValue(new FlowKey(ipProto, new RemoteKey(src6), srcPort, dstPort), out fe6);
                 dev = fe6?.Device;
-                if (dev is null) return true;
+                if (dev is null) { Interlocked.Increment(ref _enforceUnmapped); return true; }
+                Interlocked.Increment(ref _enforceMapped);
                 fe6!.LastSeen = DateTime.UtcNow.Ticks;
                 remote = new RemoteKey(dst6);
                 remotePort = dstPort; localPort = srcPort;
@@ -475,14 +476,6 @@ public sealed class TrafficEngine : IDisposable
         // 计数（outbound=设备上行，inbound=设备下行）
         if (outbound) Interlocked.Add(ref dev.TotalUp, len);
         else Interlocked.Add(ref dev.TotalDown, len);
-
-        // 管控：拉黑 / 限速（真实丢包点——不 Send 包就没了）
-        if (dev.Blocked) { Interlocked.Increment(ref _enforceDropped); return false; }
-        if (dev.LimitBytesPerSec > 0 && !TryConsumeToken(dev, len))
-        {
-            Interlocked.Increment(ref _enforceDropped);
-            return false;
-        }
 
         // TTL 伪装：设备上行出向的互联网流量，TTL 对齐宿主（Network 层的 TTL 就是线上 TTL）
         if (v4 && TtlSpoofEnabled && outbound && ipProto == 6 && !isLocalDeviceTraffic)
@@ -511,33 +504,19 @@ public sealed class TrafficEngine : IDisposable
             if (now - kv.Value.Tick > TimeSpan.FromSeconds(5).Ticks)
                 _pendingUdp.TryRemove(kv.Key, out _);
 
-        // 统计心跳（30 秒一条）：观察/执行/丢弃/流表/映射覆盖
+        // 统计心跳（30 秒一条）：观察/执行/映射覆盖/每设备计数
         if (now - _lastHeartbeat > TimeSpan.FromSeconds(30).Ticks)
         {
             _lastHeartbeat = now;
-            var mapped = _flows.Count;
             var top = string.Join(", ", _devices.Values
                 .Where(d => Interlocked.Read(ref d.TotalDown) > 0 || Interlocked.Read(ref d.TotalUp) > 0)
+                .OrderByDescending(d => Interlocked.Read(ref d.TotalDown) + Interlocked.Read(ref d.TotalUp))
                 .Take(4));
-            Logging.Log.Info($"心跳 观察={Interlocked.Read(ref _observePackets):N0}(设备{Interlocked.Read(ref _observeClient):N0}) 执行={Interlocked.Read(ref _enforcePackets):N0} 丢弃={Interlocked.Read(ref _enforceDropped):N0} 流表={mapped} [{top}]");
+            Logging.Log.Info($"心跳 观察={Interlocked.Read(ref _observePackets):N0}(设备{Interlocked.Read(ref _observeClient):N0}) 执行={Interlocked.Read(ref _enforcePackets):N0}(映射={Interlocked.Read(ref _enforceMapped):N0} 未映射={Interlocked.Read(ref _enforceUnmapped):N0}) 流表={_flows.Count} [{top}]");
         }
     }
 
     private long _lastHeartbeat;
-
-    private static bool TryConsumeToken(DeviceState s, uint cost)
-    {
-        lock (s.TokenLock)
-        {
-            var now = DateTime.UtcNow;
-            s.Tokens = Math.Min(s.LimitBytesPerSec,
-                s.Tokens + (now - s.LastRefill).TotalSeconds * s.LimitBytesPerSec);
-            s.LastRefill = now;
-            if (s.Tokens < cost) return false;
-            s.Tokens -= cost;
-            return true;
-        }
-    }
 
     /// <summary>重算 IPv4 头校验和（改了 TTL 后必须调用）。校验和字段 offset 10-11；12-15 是源地址。</summary>
     private static void FixIpChecksum(WinDivertBuffer buffer, uint len)
@@ -605,12 +584,16 @@ public sealed class TrafficEngine : IDisposable
 
     private sealed class DeviceState
     {
-        public readonly object TokenLock = new();
+        public string Ip = "";
         public long TotalUp;
         public long TotalDown;
-        public long LimitBytesPerSec;
-        public bool Blocked;
-        public double Tokens;
-        public DateTime LastRefill = DateTime.UtcNow;
+        public long ObservedPackets;
+
+        /// <summary>心跳日志用：直观显示每设备计数（此前默认 ToString 只打印类型名，无法定位归属）</summary>
+        public override string ToString()
+        {
+            const double mb = 1024.0 * 1024;
+            return $"{Ip} ↑{TotalUp / mb:N1}MB ↓{TotalDown / mb:N1}MB";
+        }
     }
 }

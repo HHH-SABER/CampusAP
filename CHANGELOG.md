@@ -3,6 +3,44 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本单源在 `Directory.Build.props`。
 
+## [0.7.0] - 2026-10-14
+
+### 修复
+
+- **提权重启静默失败（点"是"后无 UAC、无重启）**：`SHELLEXECUTEINFOW` 结构体缺 `hProcess`
+  字段（104 字节，Windows 要求 112），shell32 直接拒绝 cbSize。同根因导致"打开发布页/打开日志
+  文件夹"失效。MainViewModel 与 LogWindow 两处结构体均已补全（附无副作用探针实测：
+  104 字节 errno=5，112 字节成功）。
+
+### 新增
+
+- **管控能力 NDIS 实测校验 + UI 诚实降级（方案A）**：引擎开启后自动校验（约 20 秒）——
+  采样热点虚拟适配器真实发射速率作基线，临时拉黑流量最大设备 5 秒后对比：掉速 >30% =
+  管控有效；不掉速 = winnat 重定向架构，状态栏提示、限速下拉与拉黑按钮禁用、Web 端请求
+  拦截回滚。判定过程与结论落日志。
+- 引擎心跳诊断增强：执行层映射/未映射拆分计数、每设备上行/下行/丢弃计数与限速状态、
+  未映射流 Top 采样（此前 DeviceState.ToString 只打印类型名）。
+
+### 变更
+
+- 取证探针 v3 的 FLOW 层修正：Recv 后补 Send 回注（此前不回注 = block 流，运行即断网）；
+  事件解析偏移量修正（此前把 ParentEndpoint 当 PID），附原始 HEX 样本。
+- **发现本机 WinDivert.dll 为 2.0/2.1**：逐层 P/Invoke 实测 layer=2/3/4（Flow/Socket/Reflect）
+  全部 Win32 87（层不存在）——Flow/Socket 层为 WinDivert 2.2 才引入；WinDivertOpen 失败返回
+  -1（INVALID_HANDLE_VALUE）而非 0，探针此前误判"打开成功"。
+- 真机终审取证结论（详见 `docs/交接文档.md`）：本机热点为 winnat 双份投递架构——
+  热点口发射量 = 实际数据 2 倍，WFP 可见层丢弃副本无效；WinDivert Forward/Network 丢包、
+  NetQosPolicy 限速实测全部无效。WFP 路线对该形态原理性不可行，管控自动降级为"统计模式"。
+
+### 移除
+
+- **按设备限速/拉黑功能整体移除（2026-10-14 决策）**：真机终审确认 Win11 24H2 移动热点为
+  winnat 双份投递架构，WFP 路线（WinDivert 各层丢包、NetQosPolicy）原理性不可行，且
+  调研证实行业通行做法需要自研 NDIS 内核驱动。项目回归定位：**校园网共享 + 设备统计 +
+  TTL 伪装 + 多门户认证**。移除范围：设备行的限速下拉与拉黑按钮、Web 管理页的
+  /api/limit 与 /api/block 及对应控件、TrafficEngine 的令牌桶限速与拉黑丢包逻辑、
+  管控能力 NDIS 校验；引擎保留流量统计与 TTL 伪装，UI 开关语义改为"开启/停止统计"。
+
 ## [0.4.0] - 2026-10-03
 
 ### 修复

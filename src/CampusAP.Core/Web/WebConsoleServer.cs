@@ -8,7 +8,7 @@ namespace CampusAP.Core.Web;
 
 /// <summary>
 /// 内置 Web 管理服务（参考 WiFi共享精灵 TX_Httpd.exe）。
-/// 手机连热点后浏览器访问 http://热点网关:8899 即可看设备列表、限速、拉黑，无需装 App。
+/// 手机连热点后浏览器访问 http://热点网关:8899 即可查看设备列表与实时流量，无需装 App。
 ///
 /// 安全模型：
 /// - 热点本身是信任边界（能连上的都知道 WiFi 密码），但仍加了一层一次性令牌：
@@ -19,7 +19,6 @@ namespace CampusAP.Core.Web;
 /// </summary>
 public sealed class WebConsoleServer : IDisposable
 {
-    private readonly TrafficEngine _engine;
     private HttpListener? _listener;
     private Thread? _worker;
     private volatile bool _running;
@@ -32,17 +31,10 @@ public sealed class WebConsoleServer : IDisposable
     /// <summary>获取当前设备列表的回调（由 UI 层注入）</summary>
     public Func<IReadOnlyList<DeviceInfo>>? DeviceProvider;
 
-    /// <summary>限速命令回调（IP, 字节/秒）</summary>
-    public Action<string, long>? LimitCommand;
-
-    /// <summary>拉黑命令回调（IP, 是否拉黑）</summary>
-    public Action<string, bool>? BlockCommand;
-
     public bool IsRunning => _running;
 
-    public WebConsoleServer(TrafficEngine engine)
+    public WebConsoleServer()
     {
-        _engine = engine;
     }
 
     /// <param name="gatewayIp">热点网关地址（取自当前客户端网段 .1；空则用 ICS 经典默认）</param>
@@ -101,12 +93,6 @@ public sealed class WebConsoleServer : IDisposable
                     case "/api/devices":
                         SendJson(ctx, GetDevicesJson());
                         break;
-                    case "/api/limit":
-                        HandleLimit(ctx);
-                        break;
-                    case "/api/block":
-                        HandleBlock(ctx);
-                        break;
                     default:
                         ctx.Response.StatusCode = 404;
                         ctx.Response.Close();
@@ -145,46 +131,8 @@ public sealed class WebConsoleServer : IDisposable
             vendor = d.Vendor,
             upRate = d.UpRate,
             downRate = d.DownRate,
-            blocked = d.Blocked,
-            limit = d.LimitBytesPerSec,
         });
         return JsonSerializer.Serialize(new { ok = true, devices = list });
-    }
-
-    private void HandleLimit(HttpListenerContext ctx)
-    {
-        using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-        var body = reader.ReadToEnd();
-        try
-        {
-            var doc = JsonDocument.Parse(body);
-            var ip = doc.RootElement.GetProperty("ip").GetString() ?? "";
-            var bytesPerSec = doc.RootElement.GetProperty("bytesPerSec").GetInt64();
-            LimitCommand?.Invoke(ip, bytesPerSec);
-            SendJson(ctx, "{\"ok\":true}");
-        }
-        catch
-        {
-            SendJson(ctx, "{\"ok\":false,\"error\":\"bad request\"}");
-        }
-    }
-
-    private void HandleBlock(HttpListenerContext ctx)
-    {
-        using var reader = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
-        var body = reader.ReadToEnd();
-        try
-        {
-            var doc = JsonDocument.Parse(body);
-            var ip = doc.RootElement.GetProperty("ip").GetString() ?? "";
-            var blocked = doc.RootElement.GetProperty("blocked").GetBoolean();
-            BlockCommand?.Invoke(ip, blocked);
-            SendJson(ctx, "{\"ok\":true}");
-        }
-        catch
-        {
-            SendJson(ctx, "{\"ok\":false,\"error\":\"bad request\"}");
-        }
     }
 
     private static void SendJson(HttpListenerContext ctx, string json)
@@ -210,7 +158,7 @@ public sealed class WebConsoleServer : IDisposable
     /// <summary>设备信息快照（由 UI 层填充）</summary>
     public sealed record DeviceInfo(
         string Ip, string Mac, string DisplayName, string? Vendor,
-        string UpRate, string DownRate, bool Blocked, long LimitBytesPerSec);
+        string UpRate, string DownRate);
 
     private const string PageHtml = """
 <!DOCTYPE html>
@@ -228,13 +176,6 @@ h1 { font-size:20px; color:#0f172a; margin-bottom:14px; }
 .dev-meta { font-size:12px; color:#64748b; margin-top:2px; }
 .dev-rates { font-size:13px; color:#2563eb; margin-top:6px; }
 .row { display:flex; justify-content:space-between; align-items:center; }
-.btns { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
-button { padding:6px 14px; border:none; border-radius:8px; font-size:13px; cursor:pointer; }
-.btn-block { background:#ef4444; color:#fff; }
-.btn-unblock { background:#22c55e; color:#fff; }
-select { padding:6px; border:1px solid #cbd5e1; border-radius:8px; font-size:13px; }
-.tag { font-size:11px; padding:2px 8px; border-radius:10px; margin-left:6px; }
-.tag-blocked { background:#fef2f2; color:#ef4444; }
 </style>
 </head>
 <body>
@@ -258,39 +199,15 @@ async function load() {
       <div class="card">
         <div class="row">
           <div>
-            <div class="dev-name">${esc(dev.name || dev.ip)}${dev.blocked ? '<span class="tag tag-blocked">已拉黑</span>' : ''}</div>
+            <div class="dev-name">${esc(dev.name || dev.ip)}</div>
             <div class="dev-meta">${esc(dev.vendor ? dev.vendor + ' · ' : '')}${esc(dev.mac)} · ${esc(dev.ip)}</div>
             <div class="dev-rates">↑ ${esc(dev.upRate)} · ↓ ${esc(dev.downRate)}</div>
           </div>
-        </div>
-        <div class="btns">
-          <select onchange="setLimit('${esc(dev.ip)}', this.value)">
-            <option value="0">不限速</option>
-            <option value="2500000" ${dev.limit===2500000?'selected':''}>20 Mbps</option>
-            <option value="625000" ${dev.limit===625000?'selected':''}>5 Mbps</option>
-            <option value="125000" ${dev.limit===125000?'selected':''}>1 Mbps</option>
-            <option value="32000" ${dev.limit===32000?'selected':''}>256 Kbps</option>
-          </select>
-          <button class="${dev.blocked?'btn-unblock':'btn-block'}" onclick="toggleBlock('${esc(dev.ip)}', ${!dev.blocked})">
-            ${dev.blocked ? '解除拉黑' : '拉黑'}
-          </button>
         </div>
       </div>`).join('');
   } catch(e) {
     document.getElementById('devices').innerHTML = '<div class="card">连接失败：' + esc(e.message) + '</div>';
   }
-}
-async function setLimit(ip, bytes) {
-  await fetch('/api/limit?token=' + encodeURIComponent(AUTH), {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ip, bytesPerSec: parseInt(bytes)})});
-  load();
-}
-async function toggleBlock(ip, blocked) {
-  await fetch('/api/block?token=' + encodeURIComponent(AUTH), {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ip, blocked})});
-  load();
 }
 load();
 setInterval(load, 3000);

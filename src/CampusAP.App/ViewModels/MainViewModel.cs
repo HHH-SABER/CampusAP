@@ -20,6 +20,7 @@ public partial class MainViewModel : ObservableObject
 {
     private readonly TetheringBackend _backend = new();
     private readonly TrafficEngine _engine = new();
+
     private readonly WebConsoleServer _webConsole;
     private readonly Dictionary<string, (long Up, long Down)> _lastTotals = new();
     private DateTime _lastRateSample = DateTime.UtcNow;
@@ -45,7 +46,7 @@ public partial class MainViewModel : ObservableObject
     // ---- 设备与流量 ----
     public ObservableCollection<DeviceViewModel> Devices { get; } = new();
     [ObservableProperty] private bool engineRunning;
-    [ObservableProperty] private string engineStatusText = "流量管控未启用（限速/拉黑需要开启）";
+    [ObservableProperty] private string engineStatusText = "流量统计未启用（开启后显示设备速率并启用 TTL 伪装）";
     [ObservableProperty] private bool floatWindowOpen;
     [ObservableProperty] private bool isAdmin = new WindowsPrincipal(WindowsIdentity.GetCurrent())
         .IsInRole(WindowsBuiltInRole.Administrator);
@@ -88,15 +89,9 @@ public partial class MainViewModel : ObservableObject
         _engine.TtlSpoofEnabled = TtlSpoof;
         DarkMode = Settings.DarkMode;
 
-        _webConsole = new WebConsoleServer(_engine)
+        _webConsole = new WebConsoleServer()
         {
             DeviceProvider = GetWebDevices,
-            LimitCommand = (ip, bps) => OnLimitRequested(Devices.FirstOrDefault(d => d.Ip == ip)!, BytesToLimitIndex(bps)),
-            BlockCommand = (ip, blocked) =>
-            {
-                var vm = Devices.FirstOrDefault(d => d.Ip == ip);
-                if (vm is not null && vm.Blocked != blocked) OnBlockRequested(vm);
-            },
         };
 
         _backend.StatusChanged += s =>
@@ -481,7 +476,7 @@ public partial class MainViewModel : ObservableObject
         timer.Start();
     }
 
-    // ---- 流量管控 ----
+    // ---- 流量统计与 TTL 伪装 ----
 
     /// <summary>
     /// 以管理员身份重启自身。等价于 Process.Start(Verb="runas")，改走 Win32 ShellExecuteEx：
@@ -518,6 +513,7 @@ public partial class MainViewModel : ObservableObject
         public IntPtr hkeyClass;
         public uint dwHotKey;
         public IntPtr hIcon;
+        public IntPtr hProcess; // SHELLEXECUTEINFOW 完整尺寸为 112 字节；缺此字段时 cbSize=104 会被 shell32 直接拒绝
     }
 
     [DllImport("shell32.dll", EntryPoint = "ShellExecuteExW", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -540,13 +536,13 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void ToggleControl()
     {
-        Core.Logging.Log.Info($"管控开关点击: EngineRunning={EngineRunning} IsAdmin={IsAdmin} 热点={State} 设备数={Devices.Count}");
+        Core.Logging.Log.Info($"统计开关点击: EngineRunning={EngineRunning} IsAdmin={IsAdmin} 热点={State} 设备数={Devices.Count}");
         if (EngineRunning)
         {
             _webConsole.Stop();
             _engine.Stop();
             EngineRunning = false;
-            EngineStatusText = "流量管控未启用（限速/拉黑需要开启）";
+            EngineStatusText = "流量统计未启用（开启后显示设备速率并启用 TTL 伪装）";
             RefreshDevices(forceRates: true);
             return;
         }
@@ -554,8 +550,8 @@ public partial class MainViewModel : ObservableObject
         if (!IsAdmin)
         {
             var choice = System.Windows.MessageBox.Show(
-                "限速与拉黑需要加载内核级过滤驱动（WinDivert），因此需要管理员权限。\n\n" +
-                "是否以管理员身份重启本程序并开启流量管控？\n（重启后热点不会中断）",
+                "TTL 伪装与流量统计需要加载内核级过滤驱动（WinDivert），因此需要管理员权限。\n\n" +
+                "是否以管理员身份重启本程序并开启？\n（重启后热点不会中断）",
                 "需要管理员权限", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Question);
             if (choice != System.Windows.MessageBoxResult.Yes) return;
 
@@ -566,7 +562,7 @@ public partial class MainViewModel : ObservableObject
             }
             catch (Exception)
             {
-                EngineStatusText = "已取消管理员授权，流量管控未启用";
+                EngineStatusText = "已取消管理员授权，流量统计未启用";
             }
             return;
         }
@@ -577,11 +573,11 @@ public partial class MainViewModel : ObservableObject
             _lastSeenPackets = 0;
             _lastTrafficSeenAt = DateTime.UtcNow;
             try { _webConsole.Start(DeriveGatewayIp()); }
-            catch (Exception ex) { EngineStatusText = "管控已开，但Web管理页启动失败：" + ex.Message; }
+            catch (Exception ex) { EngineStatusText = "统计已开，但Web管理页启动失败：" + ex.Message; }
             EngineRunning = true;
             EngineStatusText = _webConsole.IsRunning
-                ? $"流量管控运行中 · 手机访问 http://{_webConsole.Gateway}:{WebConsoleServer.Port} 管理设备"
-                : "流量管控运行中";
+                ? $"流量统计运行中（含TTL伪装） · 手机访问 http://{_webConsole.Gateway}:{WebConsoleServer.Port} 查看设备"
+                : "流量统计运行中（含TTL伪装）";
         }
         catch (Exception ex)
         {
@@ -685,44 +681,12 @@ public partial class MainViewModel : ObservableObject
         return null;
     }
 
-    private void OnLimitRequested(DeviceViewModel vm, int index)
-    {
-        // 字节/秒：不限 / 20 Mbps / 5 Mbps / 1 Mbps / 256 Kbps
-        long bytesPerSec = index switch
-        {
-            1 => 2_500_000,
-            2 => 625_000,
-            3 => 125_000,
-            4 => 32_000,
-            _ => 0,
-        };
-        _engine.SetLimit(vm.Ip, bytesPerSec);
-    }
-
-    /// <summary>Web 端限速值转下拉索引</summary>
-    private static int BytesToLimitIndex(long bps) => bps switch
-    {
-        2_500_000 => 1,
-        625_000 => 2,
-        125_000 => 3,
-        32_000 => 4,
-        _ => 0,
-    };
-
     /// <summary>Web 管理页：快照当前设备列表</summary>
     private IReadOnlyList<WebConsoleServer.DeviceInfo> GetWebDevices()
     {
         return Devices.Select(d => new WebConsoleServer.DeviceInfo(
             d.Ip, d.Mac, d.DisplayName, d.Vendor,
-            d.UpRate, d.DownRate, d.Blocked,
-            d.LimitIndex switch { 1 => 2_500_000, 2 => 625_000, 3 => 125_000, 4 => 32_000, _ => 0 }
-        )).ToList();
-    }
-
-    private void OnBlockRequested(DeviceViewModel vm)
-    {
-        vm.Blocked = !vm.Blocked;
-        _engine.SetBlocked(vm.Ip, vm.Blocked);
+            d.UpRate, d.DownRate)).ToList();
     }
 
     // ---- 设备命名 ----
@@ -810,7 +774,7 @@ public partial class MainViewModel : ObservableObject
                 Devices.Clear();
                 _lastTotals.Clear();
                 _engine.SetClients(Array.Empty<string>());
-                if (EngineRunning) EngineStatusText = "流量管控运行中（暂无设备）";
+                if (EngineRunning) EngineStatusText = "流量统计运行中（暂无设备）";
             }
             return;
         }
@@ -823,9 +787,9 @@ public partial class MainViewModel : ObservableObject
 
             // 分层抓包自诊断：Forward 层是否真正抓到设备流量，真机验证时一眼可判
             var webPart = _webConsole.IsRunning
-                ? $" · 手机访问 http://{_webConsole.Gateway}:{WebConsoleServer.Port} 管理设备"
+                ? $" · 手机访问 http://{_webConsole.Gateway}:{WebConsoleServer.Port} 查看设备"
                 : "";
-            EngineStatusText = "流量管控运行中" + webPart + " · " + _engine.GetCaptureDiagnostics();
+            EngineStatusText = "流量统计运行中（含TTL伪装）" + webPart + " · " + _engine.GetCaptureDiagnostics();
 
             // 两层持续 0 包 = 本机热点的 NAT 方式让 WinDivert 抓不到设备流量：明确告警，不静默失效
             var seen = _engine.TotalPacketsSeen;
@@ -836,7 +800,7 @@ public partial class MainViewModel : ObservableObject
             }
             else if ((DateTime.UtcNow - _lastTrafficSeenAt).TotalSeconds > 10)
             {
-                EngineStatusText += " ｜⚠ 未捕获到设备流量：限速/拉黑/流量统计在本机暂不生效" +
+                EngineStatusText += " ｜⚠ 未捕获到设备流量：流量统计在本机暂不生效" +
                                     "（用 tools\\CaptureProbe 抓取证后反馈）";
             }
         }
@@ -854,8 +818,6 @@ public partial class MainViewModel : ObservableObject
                     Ip = client.Ip,
                     Mac = string.IsNullOrEmpty(client.Mac) ? "（未知）" : FormatMac(client.Mac),
                 };
-                vm.LimitRequested = OnLimitRequested;
-                vm.BlockRequested = OnBlockRequested;
                 if (Settings.DeviceNames.TryGetValue(DeviceNameKey(vm), out var savedName))
                     vm.CustomName = savedName;
                 Devices.Add(vm);

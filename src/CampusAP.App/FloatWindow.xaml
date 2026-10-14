@@ -22,7 +22,7 @@
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
-            <!-- 标题栏：状态点 + 标题 + 管控开关 + 关闭（整条可拖动） -->
+            <!-- 标题栏：状态点 + 标题 + 统计开关 + 关闭（整条可拖动） -->
             <Grid Grid.Row="0" Background="Transparent" MouseLeftButtonDown="Header_LeftButtonDown">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>

@@ -6,7 +6,7 @@ using WinDivertSharp;
 // 一次运行分辨"引擎过滤器为何 0 包"。另保留 Network 层全量与 FLOW 层（带错误码）。
 // 用法：交互模式直接运行；代理运行用 --auto <日志文件>。
 
-const int DurationSeconds = 12;
+const int DurationSeconds = 30;
 
 string? logPath = args.FirstOrDefault() == "--auto" ? args.ElementAtOrDefault(1) : null;
 
@@ -63,10 +63,10 @@ foreach (var (name, filter, priority, stat) in openings)
 var flowStat = new FlowStat();
 var flowThread = new Thread(() =>
 {
-    var h = WinDivertNative.WDOpen("true", 1 /* FLOW */, 0, 0);
+    var h = WinDivertNative.WDOpen("true", 2 /* FLOW：WinDivert 2.x 层值 NETWORK=0/FORWARD=1/FLOW=2；WinDivertSharp 枚举未封装 Flow */, 0, 0);
     if (h == IntPtr.Zero) { flowStat.OpenError = Marshal.GetLastWin32Error(); return; }
     var buf = new byte[0x10000];
-    var addr = new byte[128];
+    var addr = new byte[1024]; // WINDIVERT_ADDRESS 完整结构含 Reflect union（x64 约 320+ 字节），必须给足否则溢出
     var deadline = DateTime.UtcNow.AddSeconds(DurationSeconds);
     while (DateTime.UtcNow < deadline)
     {
@@ -77,6 +77,9 @@ var flowThread = new Thread(() =>
             break;
         }
         flowStat.Count(addr);
+        // Flow 层语义：Recv 后必须 Send 回注 = permit 该流；不 Send = block（会断流！）
+        uint sent = 0;
+        WinDivertNative.WDSend(h, buf, 0, ref sent, addr);
     }
     WinDivertNative.WDClose(h);
 }) { Name = "probe-flow" };
@@ -92,8 +95,8 @@ if (flowStat.OpenError != 0) P($"打开失败：Win32 {flowStat.OpenError}");
 else if (flowStat.RecvError != 0) P($"Recv 失败退出：Win32 {flowStat.RecvError}（0 事件不可信）");
 else
 {
-    P($"事件总数 {flowStat.Total}");
-    foreach (var line in flowStat.Samples.Take(30)) P("  " + line);
+    P($"事件总数 {flowStat.Total}（建立 {flowStat.Established} / 删除 {flowStat.Deleted}，回环 {flowStat.Loopback}）");
+    foreach (var line in flowStat.Samples.Take(40)) P("  " + line);
 }
 P("");
 
@@ -145,6 +148,10 @@ internal static class WinDivertNative
     [DllImport("WinDivert.dll", SetLastError = true, EntryPoint = "WinDivertRecv")]
     public static extern bool WDRecv(IntPtr handle, byte[] buffer, uint packetLen, ref uint length, [Out] byte[] addr);
 
+    // 原生签名：WinDivertSend(HANDLE, VOID* pPacket, UINT packetLen, UINT* pSendLen, WINDIVERT_ADDRESS* pAddr)
+    [DllImport("WinDivert.dll", SetLastError = true, EntryPoint = "WinDivertSend")]
+    public static extern bool WDSend(IntPtr handle, byte[] buffer, uint packetLen, ref uint length, byte[] addr);
+
     [DllImport("WinDivert.dll", SetLastError = true, EntryPoint = "WinDivertClose")]
     public static extern bool WDClose(IntPtr handle);
 }
@@ -154,32 +161,57 @@ internal sealed class FlowStat
     public int OpenError;
     public int RecvError;
     public long Total;
+    public long Established;
+    public long Deleted;
+    public long Loopback;
     public readonly List<string> Samples = new();
     private readonly object _lock = new();
 
+    // WINDIVERT_ADDRESS（x64）偏移：0 Timestamp(8) | 8 位域(Layer:8,Event:8,Loopback:1@16,Outbound:1@17,IPv6:1@19)
+    // | 12 Reserved2(2) + pad(2) | 16 Flow union: Endpoint(8) ParentEndpoint(8) ProcessId(4)@32
+    // LocalAddr[4]@36 RemoteAddr[4]@52 LocalPort@68 RemotePort@70 Protocol@72
     public void Count(byte[] a)
     {
         lock (_lock)
         {
+            var layer = a[8];
+            if (layer != 1) return; // 仅统计 FLOW 层事件
             Total++;
-            if (Samples.Count >= 30) return;
-            uint bits = BitConverter.ToUInt32(a, 8);
-            if ((int)(bits & 0xFF) != 1) return;
-            bool outbound = (bits & 0x100) != 0;
-            const int ep = 12;
-            int localOff = ep + 20;
-            var local = Addr16(a, localOff);
-            var remote = Addr16(a, localOff + 16);
-            uint lport = BitConverter.ToUInt32(a, localOff + 32) & 0xFFFF;
-            uint rport = BitConverter.ToUInt32(a, localOff + 36) & 0xFFFF;
-            var proto = a[localOff + 40] switch { 6 => "TCP", 17 => "UDP", 1 => "ICMP", _ => $"p{a[localOff + 40]}" };
-            Samples.Add($"{(outbound ? "出" : "入")} {proto} {local}:{lport} → {remote}:{rport} PID={BitConverter.ToUInt32(a, ep + 16)}");
+            var flags = BitConverter.ToUInt32(a, 8);
+            var evt = (int)(flags >> 8 & 0xFF);
+            if (evt == 1) Established++; else if (evt == 2) Deleted++;
+            var isV6 = (flags & 0x80000) != 0;          // bit19
+            var isLoopback = (flags & 0x10000) != 0;    // bit16
+            var outbound = (flags & 0x20000) != 0;      // bit17
+            if (isLoopback) Loopback++;
+
+            var pid = BitConverter.ToUInt32(a, 32);
+            var proto = a[72] switch { 6 => "TCP", 17 => "UDP", _ => $"p{a[72]}" };
+            var local = Addr(a, 36, isV6);
+            var remote = Addr(a, 52, isV6);
+            var lport = BitConverter.ToUInt16(a, 68);
+            var rport = BitConverter.ToUInt16(a, 70);
+
+            var evtName = evt switch { 1 => "建", 2 => "删", _ => $"e{evt}" };
+            var line = $"{evtName} {(outbound ? "出" : "入")} {(isV6 ? "v6" : "v4")} {proto} {local}:{lport} → {remote}:{rport} PID={pid}{(isLoopback ? " [回环]" : "")}";
+            if (Samples.Count < 20)
+            {
+                Samples.Add(line);
+                if (Samples.Count == 1)
+                    Samples.Add("HEX[0..79]: " + Convert.ToHexString(a, 0, 80));
+            }
+            else if (Samples.Count < 40 && evt == 1 && !isLoopback && Samples.Count(s => s.Contains("建")) < 40)
+            {
+                Samples.Add(line);
+            }
         }
     }
 
-    private static string Addr16(byte[] a, int off)
+    private static string Addr(byte[] a, int off, bool v6)
     {
-        if (a[off + 10] == 0xff && a[off + 11] == 0xff)
+        if (!v6 && a[off + 10] == 0xff && a[off + 11] == 0xff)
+            return $"{a[off + 12]}.{a[off + 13]}.{a[off + 14]}.{a[off + 15]}";
+        if (!v6)
             return $"{a[off + 12]}.{a[off + 13]}.{a[off + 14]}.{a[off + 15]}";
         var sb = new System.Text.StringBuilder();
         for (var i = 0; i < 16; i += 2)
