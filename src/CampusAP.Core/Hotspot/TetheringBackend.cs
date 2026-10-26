@@ -73,6 +73,8 @@ public sealed class TetheringBackend : IDisposable
     {
         var manager = RequireManager();
         Notify(HotspotState.Starting, (int)manager.ClientCount);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        Logging.Log.Info($"热点启动请求：系统状态={manager.TetheringOperationalState}");
         NetworkOperatorTetheringOperationResult result;
         try
         {
@@ -81,6 +83,7 @@ public sealed class TetheringBackend : IDisposable
         catch (TimeoutException)
         {
             // 驱动 SoftAP 卡死（WLAN 事件 8010/1168 常见伴生）：后台尝试拆除复位，UI 给明确指引
+            Logging.Log.Error($"热点启动超时（{sw.ElapsedMilliseconds}ms）：系统状态={manager.TetheringOperationalState}");
             _ = TryStopToResetAsync(manager);
             var detail = "热点启动超时（30 秒无响应）：无线网卡的 SoftAP 状态可能卡死。" +
                          "最快的解法：重启电脑；或到 Windows 设置里手动开关一次移动热点；" +
@@ -88,6 +91,7 @@ public sealed class TetheringBackend : IDisposable
             Notify(HotspotState.Error, (int)manager.ClientCount, detail);
             throw new InvalidOperationException(detail);
         }
+        Logging.Log.Info($"热点启动返回：Status={result.Status}（{sw.ElapsedMilliseconds}ms），系统状态={manager.TetheringOperationalState}");
         if (result.Status != TetheringOperationStatus.Success)
         {
             var detail = $"启动失败：{result.Status}。{result.AdditionalErrorMessage}".Trim();
@@ -102,6 +106,8 @@ public sealed class TetheringBackend : IDisposable
     {
         var manager = RequireManager();
         Notify(HotspotState.Stopping, (int)manager.ClientCount);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        Logging.Log.Info($"热点关闭请求：系统状态={manager.TetheringOperationalState}");
         NetworkOperatorTetheringOperationResult result;
         try
         {
@@ -109,11 +115,13 @@ public sealed class TetheringBackend : IDisposable
         }
         catch (TimeoutException)
         {
+            Logging.Log.Error($"热点关闭超时（{sw.ElapsedMilliseconds}ms）：系统状态={manager.TetheringOperationalState}");
             _ = TryStopToResetAsync(manager);
             var detail = "热点关闭超时（30 秒无响应）：无线网卡 SoftAP 状态可能卡死，建议重启电脑复位。";
             Notify(HotspotState.Error, (int)manager.ClientCount, detail);
             throw new InvalidOperationException(detail);
         }
+        Logging.Log.Info($"热点关闭返回：Status={result.Status}（{sw.ElapsedMilliseconds}ms），系统状态={manager.TetheringOperationalState}");
         if (result.Status != TetheringOperationStatus.Success)
         {
             var detail = $"关闭失败：{result.Status}。{result.AdditionalErrorMessage}".Trim();

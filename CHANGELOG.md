@@ -3,6 +3,19 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。版本单源在 `Directory.Build.props`。
 
+## [0.7.2] - 2026-10-26
+
+### 修复
+
+- **热点开启"每次都卡住"的真正根因：轮询盲点（非驱动问题）**。真机日志证实 30 秒超时从未
+  触发——`StartTetheringAsync` 实际正常返回，但 UI 永久停在"请稍候"。原因是轮询定时器在
+  `Starting`/`Stopping` 状态下直接 return，不再读取系统真实状态；系统随后从 InTransition
+  收敛到 On/Off，程序永远感知不到。
+  - 轮询在过渡态继续跟踪系统状态，UI 随系统收敛
+  - 过渡态超过 60 秒未收敛才转 Error 并给出自愈指引
+  - 开关异常后状态机不再滞留 Starting/Stopping（回读系统真实状态）
+- 热点开/关全链路诊断日志：请求时系统状态、返回 Status、耗时、返回后系统状态。
+
 ## [0.7.1] - 2026-10-26
 
 ### 修复

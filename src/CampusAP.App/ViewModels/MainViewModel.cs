@@ -248,6 +248,13 @@ public partial class MainViewModel : ObservableObject
         catch (Exception ex)
         {
             StatusText = ex.Message;
+            // 异常后状态机不得停留在 Starting/Stopping（IsBusy 已释放）：
+            // 回读系统真实状态，交给修复后的轮询继续跟踪收敛
+            if (State is HotspotState.Starting or HotspotState.Stopping)
+            {
+                try { State = _backend.PeekStatus().State; }
+                catch { State = HotspotState.Error; }
+            }
         }
         finally
         {
@@ -770,15 +777,41 @@ public partial class MainViewModel : ObservableObject
         timer.Tick += (_, _) =>
         {
             if (!CapabilityOk || IsBusy) return;
-            if (State is HotspotState.Starting or HotspotState.Stopping) return;
+            // Starting/Stopping 不再是轮询盲点：持续读取系统真实状态。
+            // （旧代码在此直接 return，导致系统从 InTransition 转回 On/Off 后 UI 永远感知不到——
+            // 真机取证确认这才是"每次开启热点都卡住"的根因，而非驱动挂起）
             var s = _backend.PeekStatus();
-            if (s.State != State) { ApplyStatus(s); OnPropertyChanged(nameof(ToggleText)); }
-            else ClientCount = s.ClientCount;
+            if (s.State != State)
+            {
+                ApplyStatus(s);
+                OnPropertyChanged(nameof(ToggleText));
+                _transitionSince = null;
+            }
+            else if (State is HotspotState.Starting or HotspotState.Stopping)
+            {
+                _transitionSince ??= DateTime.UtcNow;
+                if (DateTime.UtcNow - _transitionSince > TimeSpan.FromSeconds(60))
+                {
+                    _transitionSince = null;
+                    ApplyStatus(new HotspotStatus(HotspotState.Error, ClientCount,
+                        "热点长时间处于过渡状态（>60 秒）：系统或网卡驱动可能卡住。" +
+                        "请在 Windows 设置中手动开关一次移动热点复位，或重启电脑后重试。"));
+                    OnPropertyChanged(nameof(ToggleText));
+                }
+            }
+            else
+            {
+                ClientCount = s.ClientCount;
+                _transitionSince = null;
+            }
 
             RefreshDevices();
         };
         timer.Start();
     }
+
+    /// <summary>Starting/Stopping 停留起始时间（轮询兜底：超 60 秒未收敛转 Error）</summary>
+    private DateTime? _transitionSince;
 
     private void RefreshDevices(bool forceRates = false)
     {
