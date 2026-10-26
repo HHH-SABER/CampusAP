@@ -320,6 +320,9 @@
                         <CheckBox Content="夜间" IsChecked="{Binding DarkMode}"
                                   VerticalAlignment="Center" Margin="0,0,12,0" FontSize="12"
                                   Foreground="{DynamicResource Brush.TextSecondary}" ToolTip="夜间模式（深色主题）"/>
+                        <CheckBox Content="自启" IsChecked="{Binding AutoStart}"
+                                  VerticalAlignment="Center" Margin="0,0,12,0" FontSize="12"
+                                  Foreground="{DynamicResource Brush.TextSecondary}" ToolTip="开机自动启动 CampusAP（当前用户登录时启动，无需管理员）"/>
                         <Button Content="日志" Click="OpenLog_Click" Cursor="Hand" Padding="10,4"
                                 BorderThickness="0" Foreground="White" FontWeight="SemiBold"
                                 VerticalAlignment="Center" Margin="0,0,8,0"

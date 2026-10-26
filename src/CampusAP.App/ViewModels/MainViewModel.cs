@@ -88,6 +88,9 @@ public partial class MainViewModel : ObservableObject
         TtlSpoof = Settings.TtlSpoofEnabled;
         _engine.TtlSpoofEnabled = TtlSpoof;
         DarkMode = Settings.DarkMode;
+        // 注册表是事实源：用户手动清了 Run 键时，UI 如实反映。
+        // 赋值会触发 OnAutoStartChanged，但 Set(同值) 幂等无副作用。
+        autoStart = Services.AutoStartManager.IsEnabled;
 
         _webConsole = new WebConsoleServer()
         {
@@ -105,6 +108,22 @@ public partial class MainViewModel : ObservableObject
         _engine.TtlSpoofEnabled = value;
         Settings.TtlSpoofEnabled = value;
         Settings.Save();
+    }
+
+    /// <summary>开机自启动（HKCU Run 键，注册表为事实源）</summary>
+    [ObservableProperty]
+    private bool autoStart;
+
+    partial void OnAutoStartChanged(bool value)
+    {
+        try
+        {
+            Services.AutoStartManager.Set(value);
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"自启动设置失败：{ex.Message}";
+        }
     }
 
     [RelayCommand]

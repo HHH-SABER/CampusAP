@@ -6,9 +6,17 @@ namespace CampusAP.Core.Hotspot;
 /// <summary>
 /// 基于 Win10/11 系统移动热点（NetworkOperatorTetheringManager）的后端实现。
 /// 免驱动、NAT 由系统完成；这是竞品（360/WiFi共享大师）用自研 NAT 驱动绕开系统 ICS 之后的现代替代路线。
+///
+/// 超时保护（真机教训：MT7922 等网卡驱动的 SoftAP 状态卡死时，StartTetheringAsync 永不返回，
+/// UI 会永远停在"请稍候"）：所有 WinRT 异步调用统一加超时，超时后给出明确自愈指引，
+/// 并尝试后台拆除以复位驱动 SoftAP 状态。
 /// </summary>
 public sealed class TetheringBackend : IDisposable
 {
+    /// <summary>热点启动/关闭的等待上限。正常 < 10 秒；超时基本等于驱动 SoftAP 卡死。</summary>
+    private static readonly TimeSpan ToggleTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ConfigTimeout = TimeSpan.FromSeconds(15);
+
     private NetworkOperatorTetheringManager? _manager;
 
     /// <summary>状态变化推送（可能来自非 UI 线程，订阅方自行调度）</summary>
@@ -65,7 +73,21 @@ public sealed class TetheringBackend : IDisposable
     {
         var manager = RequireManager();
         Notify(HotspotState.Starting, (int)manager.ClientCount);
-        var result = await manager.StartTetheringAsync();
+        NetworkOperatorTetheringOperationResult result;
+        try
+        {
+            result = await manager.StartTetheringAsync().AsTask().WaitAsync(ToggleTimeout);
+        }
+        catch (TimeoutException)
+        {
+            // 驱动 SoftAP 卡死（WLAN 事件 8010/1168 常见伴生）：后台尝试拆除复位，UI 给明确指引
+            _ = TryStopToResetAsync(manager);
+            var detail = "热点启动超时（30 秒无响应）：无线网卡的 SoftAP 状态可能卡死。" +
+                         "最快的解法：重启电脑；或到 Windows 设置里手动开关一次移动热点；" +
+                         "或在设备管理器中禁用再启用无线网卡。程序已尝试自动复位，可稍后重试。";
+            Notify(HotspotState.Error, (int)manager.ClientCount, detail);
+            throw new InvalidOperationException(detail);
+        }
         if (result.Status != TetheringOperationStatus.Success)
         {
             var detail = $"启动失败：{result.Status}。{result.AdditionalErrorMessage}".Trim();
@@ -80,7 +102,18 @@ public sealed class TetheringBackend : IDisposable
     {
         var manager = RequireManager();
         Notify(HotspotState.Stopping, (int)manager.ClientCount);
-        var result = await manager.StopTetheringAsync();
+        NetworkOperatorTetheringOperationResult result;
+        try
+        {
+            result = await manager.StopTetheringAsync().AsTask().WaitAsync(ToggleTimeout);
+        }
+        catch (TimeoutException)
+        {
+            _ = TryStopToResetAsync(manager);
+            var detail = "热点关闭超时（30 秒无响应）：无线网卡 SoftAP 状态可能卡死，建议重启电脑复位。";
+            Notify(HotspotState.Error, (int)manager.ClientCount, detail);
+            throw new InvalidOperationException(detail);
+        }
         if (result.Status != TetheringOperationStatus.Success)
         {
             var detail = $"关闭失败：{result.Status}。{result.AdditionalErrorMessage}".Trim();
@@ -88,6 +121,19 @@ public sealed class TetheringBackend : IDisposable
             throw new InvalidOperationException(detail);
         }
         return Notify(HotspotState.Off, (int)manager.ClientCount, "热点已关闭");
+    }
+
+    /// <summary>启动/关闭超时后后台尝试反向操作，复位卡死的驱动 SoftAP 状态（尽力而为，静默失败）</summary>
+    private static async Task TryStopToResetAsync(NetworkOperatorTetheringManager manager)
+    {
+        try
+        {
+            await manager.StopTetheringAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(15));
+        }
+        catch
+        {
+            // 复位失败只能靠用户重启系统/网卡，不再叠加报错
+        }
     }
 
     /// <summary>写入热点名称/密码/频段（已开启时系统会热更新广播）</summary>
@@ -103,7 +149,7 @@ public sealed class TetheringBackend : IDisposable
             HotspotBand.Band5GHz => TetheringWiFiBand.FiveGigahertz,
             _ => TetheringWiFiBand.Auto,
         };
-        await manager.ConfigureAccessPointAsync(config);
+        await manager.ConfigureAccessPointAsync(config).AsTask().WaitAsync(ConfigTimeout);
     }
 
     /// <summary>读取当前生效的配置（SSID/密码/频段）</summary>
